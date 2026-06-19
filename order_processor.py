@@ -36,9 +36,16 @@ def load_file_safely(file):
     """Load uploaded file object (CSV or Excel) into a DataFrame."""
     if file is None:
         return pd.DataFrame()
+    try:
+        file.seek(0)
+    except Exception:
+        pass
     name = file.name.lower()
     raw = file.read()
-    file.seek(0)
+    try:
+        file.seek(0)
+    except Exception:
+        pass
     try:
         if name.endswith(".csv"):
             return pd.read_csv(io.BytesIO(raw), dtype=str)
