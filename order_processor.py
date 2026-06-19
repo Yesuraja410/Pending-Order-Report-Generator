@@ -37,6 +37,41 @@ def _clean_order_id(val):
         
     return s
 
+def parse_country_and_channel(nickname):
+    nick = str(nickname).strip().upper()
+    # Extract Country
+    if nick.endswith("SG") or "-SG" in nick or "_SG" in nick:
+        country = "SG"
+    elif nick.endswith("MY") or "-MY" in nick or "_MY" in nick:
+        country = "MY"
+    elif nick.endswith("PH") or "-PH" in nick or "_PH" in nick:
+        country = "PH"
+    else:
+        # Default fallback checks
+        if "SG" in nick:
+            country = "SG"
+        elif "MY" in nick:
+            country = "MY"
+        elif "PH" in nick:
+            country = "PH"
+        else:
+            country = "UNKNOWN"
+            
+    # Extract Channel
+    nick_lower = nick.lower()
+    if "shopee" in nick_lower:
+        channel = "Shopee"
+    elif "lazada" in nick_lower:
+        channel = "Lazada"
+    elif "zalora" in nick_lower:
+        channel = "Zalora"
+    elif "tiktok" in nick_lower:
+        channel = "TikTok"
+    else:
+        channel = "Other"
+        
+    return country, channel
+
 def _find_column(df, candidates):
     """Find a column in df that matches any of the candidate names case-insensitively and ignoring underscores/spaces."""
     cols = list(df.columns)
@@ -119,16 +154,28 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     if df_oms.empty:
         raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
 
+    # Find store column in SLA Report first to ignore TikTok PH
+    pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    if pend_store_col and pend_store_col in df_pending.columns:
+        # Filter out TikTok PH orders
+        df_pending = df_pending[df_pending[pend_store_col].astype(str).str.strip().str.lower() != 'tiktok-ph'].copy()
+
+    if df_pending.empty:
+        raise ValueError("Pending Order Report (SLA Report) has no rows after filtering out TikTok PH.")
+
     # == 2. Standardize Columns ===============================================
     # Pending Order columns
     pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
-    pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
     
     # TC Report columns (All file)
     tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    tc_num_col = _find_column(df_tc, ["order_number", "order_id"]) # specifically find order_number column
     tc_status_col = _find_column(df_tc, ["order_status", "TC Status", "Order Status", "Status", "TC_Status"])
-    tc_sla_col = _find_column(df_tc, ["order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
+    
+    # SLA Lookup targets time_to_ship_dead_line as primary, then fallback
+    tc_sla_col = _find_column(df_tc, ["time_to_ship_dead_line", "order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
+    
     tc_pay_status_col = _find_column(df_tc, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"])
     tc_pay_method_col = _find_column(df_tc, ["payment_methods", "Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
     
@@ -150,9 +197,11 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     df_pending[pend_id_col] = df_pending[pend_id_col].apply(_clean_order_id)
     df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
     df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
+    if tc_num_col:
+        df_tc[tc_num_col] = df_tc[tc_num_col].apply(_clean_order_id)
 
     # == 3. SLA Enrichment & Pushed Status ====================================
-    # Build TC lookup maps
+    # Build TC mappings
     tc_sla_map = {}
     if tc_sla_col:
         tc_sla_map = df_tc.set_index(tc_id_col)[tc_sla_col].dropna().to_dict()
@@ -164,6 +213,17 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     tc_payment_method = {}
     if tc_pay_method_col:
         tc_payment_method = df_tc.set_index(tc_id_col)[tc_pay_method_col].dropna().to_dict()
+
+    # Build bidirectional ID to package-number mappings from TC report (crucial for Zalora package lookup)
+    tc_id_to_num = {}
+    tc_num_to_id = {}
+    if tc_id_col and tc_num_col and tc_id_col != tc_num_col:
+        for _, row in df_tc.iterrows():
+            oid = row[tc_id_col]
+            onum = row[tc_num_col]
+            if oid and onum:
+                tc_id_to_num[oid] = onum
+                tc_num_to_id[onum] = oid
 
     # Build OMS status lookup maps
     oms_status_map = df_oms.set_index(oms_id_col)[oms_status_col].dropna().to_dict() if oms_status_col else {}
@@ -209,11 +269,20 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         else:
             df_pending.at[idx, "SLA Source"] = "Pending Report"
 
-        # ── OMS Status & Final Remarks Check ──
-        is_in_oms = order_id in oms_status_map
+        # ── OMS Status & Final Remarks Check (Checking both SLA ID and Mapped TC Order Number) ──
+        tc_mapped_num = tc_id_to_num.get(order_id, "")
         
-        if is_in_oms:
+        is_in_oms = False
+        oms_stat = ""
+        
+        if order_id in oms_status_map:
+            is_in_oms = True
             oms_stat = oms_status_map[order_id]
+        elif tc_mapped_num and tc_mapped_num in oms_status_map:
+            is_in_oms = True
+            oms_stat = oms_status_map[tc_mapped_num]
+            
+        if is_in_oms:
             df_pending.at[idx, "OMS Order Status"] = oms_stat
             df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
             pushed_count += 1
@@ -249,7 +318,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
 
     oms_lookup = {}
     for _, row in df_oms.iterrows():
-        oid = row[oms_id_col]
+        oid_raw = row[oms_id_col]
+        # Map OMS package number back to TC order_id to align keys correctly for Zalora
+        oid = tc_num_to_id.get(oid_raw, oid_raw)
         oms_lookup[oid] = {
             "Status": _clean_str(row[oms_status_col]) if oms_status_col else "",
             "Row": row.to_dict()
@@ -267,7 +338,10 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         is_tc_cancelled = tc_status.lower() in ("cancelled", "canceled")
         is_oms_cancelled = oms_status.lower() in ("cancelled", "canceled")
         
-        if is_tc_cancelled != is_oms_cancelled:
+        # Exception: TC status is Cancelled and OMS is Returned/Return -> Ignore mismatch!
+        is_tc_cancelled_and_oms_returned = is_tc_cancelled and (oms_status.lower() in ("returned", "return"))
+        
+        if is_tc_cancelled != is_oms_cancelled and not is_tc_cancelled_and_oms_returned:
             discrepancies.append({
                 "Order ID": oid,
                 "Validation Result": "Cancelled Sync Mismatch",
@@ -320,6 +394,59 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             "email": mapped_email
         }
 
+    # == 6. Country-specific datasets & Pivot Tables ==========================
+    country_reports = {}
+    for country in ["SG", "MY", "PH"]:
+        c_rows = []
+        for idx, row in df_pending.iterrows():
+            store_val = _clean_str(row[target_store_col])
+            c_code, chan = parse_country_and_channel(store_val)
+            if c_code == country:
+                # Apply channel filter requirements:
+                # SG: Lazada, Shopee, Zalora
+                # MY: Lazada, Shopee, Zalora, TikTok
+                # PH: Lazada, Shopee, Zalora (TikTok PH already ignored at start)
+                if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
+                    row_dict = row.to_dict()
+                    row_dict["Country"] = country
+                    row_dict["Channel"] = chan
+                    c_rows.append(row_dict)
+                elif country == "MY" and chan in ["Lazada", "Shopee", "Zalora", "TikTok"]:
+                    row_dict = row.to_dict()
+                    row_dict["Country"] = country
+                    row_dict["Channel"] = chan
+                    c_rows.append(row_dict)
+                elif country == "PH" and chan in ["Lazada", "Shopee", "Zalora"]:
+                    row_dict = row.to_dict()
+                    row_dict["Country"] = country
+                    row_dict["Channel"] = chan
+                    c_rows.append(row_dict)
+                    
+        country_df = pd.DataFrame(c_rows)
+        if not country_df.empty:
+            # Pivot table: Channel vs Final Remarks
+            pivot_df = country_df.pivot_table(
+                index="Channel",
+                columns="Final Remarks",
+                values="Correct Order Number",
+                aggfunc="count",
+                fill_value=0
+            )
+            # Add Grand Totals
+            pivot_df["Grand Total"] = pivot_df.sum(axis=1)
+            pivot_df.loc["Grand Total"] = pivot_df.sum(axis=0)
+            pivot_df = pivot_df.reset_index()
+            
+            country_reports[country] = {
+                "raw_df": country_df,
+                "pivot_df": pivot_df
+            }
+        else:
+            country_reports[country] = {
+                "raw_df": pd.DataFrame(),
+                "pivot_df": pd.DataFrame()
+            }
+
     # Summary metrics
     summary = {
         "total_pending_orders": len(df_pending),
@@ -339,5 +466,6 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         "discrepancies_df": df_discrepancies,
         "summary": summary,
         "seller_groups": seller_groups,
-        "pending_order_id_col": target_sla_col
+        "pending_order_id_col": target_sla_col,
+        "country_reports": country_reports
     }
