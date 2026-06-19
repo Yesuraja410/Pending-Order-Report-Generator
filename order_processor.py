@@ -33,7 +33,7 @@ def _find_column(df, candidates):
     return None
 
 def load_file_safely(file):
-    """Load uploaded file object (CSV or Excel) into a DataFrame."""
+    """Load uploaded file object (CSV or Excel) into a DataFrame. Scans sheets if Excel."""
     if file is None:
         return pd.DataFrame()
     
@@ -50,43 +50,39 @@ def load_file_safely(file):
                 file.seek(0)
                 df = pd.read_csv(file, dtype=str)
                 if not df.empty:
-                    return df
+                    return df.dropna(how="all").reset_index(drop=True)
             except Exception:
                 pass
             
             # Fallback to reading bytes
             file.seek(0)
             raw = file.read()
-            return pd.read_csv(io.BytesIO(raw), dtype=str)
+            df = pd.read_csv(io.BytesIO(raw), dtype=str)
+            return df.dropna(how="all").reset_index(drop=True)
         else:
-            # Excel
+            # Excel - Scan all sheets to find the first non-empty one
             try:
                 file.seek(0)
-                df = pd.read_excel(file, dtype=str, engine="openpyxl")
-                if not df.empty:
-                    return df
+                xl = pd.ExcelFile(file)
             except Exception:
-                pass
-                
-            try:
                 file.seek(0)
-                df = pd.read_excel(file, dtype=str)
-                if not df.empty:
-                    return df
-            except Exception:
-                pass
+                raw = file.read()
+                xl = pd.ExcelFile(io.BytesIO(raw))
                 
-            # Fallback to reading bytes
-            file.seek(0)
-            raw = file.read()
-            try:
-                return pd.read_excel(io.BytesIO(raw), dtype=str, engine="openpyxl")
-            except Exception:
+            for sheet in xl.sheet_names:
                 try:
-                    import python_calamine
-                    return pd.read_excel(io.BytesIO(raw), dtype=str, engine="calamine")
+                    df = xl.parse(sheet, dtype=str)
+                    if df is not None and not df.empty:
+                        df_clean = df.dropna(how="all").reset_index(drop=True)
+                        if not df_clean.empty:
+                            return df_clean
                 except Exception:
-                    return pd.read_excel(io.BytesIO(raw), dtype=str)
+                    continue
+            
+            # Fallback: if all sheets are empty, return the first sheet
+            if xl.sheet_names:
+                return xl.parse(xl.sheet_names[0], dtype=str)
+            return pd.DataFrame()
     except Exception as e:
         raise ValueError(f"Failed to read file {file.name}: {str(e)}")
 
