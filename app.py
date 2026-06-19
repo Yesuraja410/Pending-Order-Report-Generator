@@ -71,6 +71,23 @@ else:
         m3.metric("Validation Mismatches", summary["total_discrepancies"], delta=-summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else 0, delta_color="inverse")
         m4.metric("Total Sellers / Stores", summary["total_sellers"])
         
+        # Download Section
+        st.markdown("### Download Report")
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            enriched_df.to_excel(writer, sheet_name="Enriched Pending Orders", index=False)
+            if not disc_df.empty:
+                disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+        
+        st.download_button(
+            label="📥 Download Enriched Pending Orders & Discrepancies (Excel)",
+            data=excel_buffer.getvalue(),
+            file_name=f"Order_Validation_Report_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_consolidated"
+        )
+        
         # Display layout of tables
         st.markdown("### Detailed Results")
         sub_tab1, sub_tab2, sub_tab3 = st.tabs([
