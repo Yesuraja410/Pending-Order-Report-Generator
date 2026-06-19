@@ -20,17 +20,17 @@ from email_sender import test_smtp_connection, send_seller_report_email
 inject_css()
 
 # Custom title and introduction
-st.title("Pending Order & OMS Status Validation")
-st.write("Upload the daily Pending Order Report, TC Order Report, and OMS Order Report in the sidebar to run validations and email reports directly to the sellers.")
+st.title("Pending Order SLA Enrichment & OMS Status Validation")
+st.write("Upload the daily SLA Report, TC Report (All file), and OMS Report (Sales Order file) in the sidebar to run validations and email reports directly to the sellers.")
 
 # == Sidebar ==================================================================-
 with st.sidebar:
     st.markdown("## Configuration")
     st.markdown("Upload the daily reports below:")
     
-    order_pending = st.file_uploader("1. Pending Order Report", type=["xlsx","xls","csv"], key="order_pending")
-    order_tc = st.file_uploader("2. TC Order Report", type=["xlsx","xls","csv"], key="order_tc")
-    order_oms = st.file_uploader("3. OMS Order Report", type=["xlsx","xls","csv"], key="order_oms")
+    order_pending = st.file_uploader("1. Pending Order Report (SLA Report)", type=["xlsx","xls","csv"], key="order_pending")
+    order_tc = st.file_uploader("2. TC Report (All file)", type=["xlsx","xls","csv"], key="order_tc")
+    order_oms = st.file_uploader("3. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
     seller_contacts = st.file_uploader("4. Seller Contact List (Optional)", type=["xlsx","xls","csv"], key="seller_contacts")
     
     st.markdown("---")
@@ -39,7 +39,7 @@ with st.sidebar:
 # == Main Screen ===============================================================
 # Check if files are uploaded
 if not (order_pending and order_tc and order_oms):
-    st.info("Please upload the Pending Order Report, TC Order Report, and OMS Order Report in the sidebar to get started.")
+    st.info("Please upload the Pending Order Report, TC Report, and OMS Report in the sidebar to get started.")
 else:
     # Trigger validation either by clicking sidebar button or main screen button
     if run_btn or st.button("Run Validation & Analysis", type="primary", use_container_width=True):
@@ -65,43 +65,50 @@ else:
         
         # Display metrics
         st.markdown("### Key Metrics")
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Total Pending Orders", summary["total_pending_orders"])
-        m2.metric("Enriched SLAs from TC", summary["enriched_sla_count"])
-        m3.metric("Validation Mismatches", summary["total_discrepancies"], delta=-summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else 0, delta_color="inverse")
-        m4.metric("Total Sellers / Stores", summary["total_sellers"])
+        m2.metric("Successfully Pushed", summary["pushed_count"])
+        m3.metric("Not Pushed to OMS", summary["not_pushed_count"])
+        m4.metric("Unpaid Orders", summary["unpaid_count"])
+        m5.metric("Status Discrepancies", summary["total_discrepancies"], 
+                  delta=summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else None, 
+                  delta_color="inverse")
         
-        # Download Section
-        st.markdown("### Download Report")
+        # Download Section matching screenshot
+        st.markdown('<div class="download-container">', unsafe_allow_html=True)
+        st.markdown('<h3 class="download-header">📥 Download Validation Reports</h3>', unsafe_allow_html=True)
+        
         excel_buffer = io.BytesIO()
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            enriched_df.to_excel(writer, sheet_name="Enriched Pending Orders", index=False)
-            if not disc_df.empty:
-                disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+            # Sheet 1: SLA Report
+            enriched_df.to_excel(writer, sheet_name="SLA Report", index=False)
+            # Sheet 2: Status Discrepancies
+            disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
         
         st.download_button(
-            label="📥 Download Enriched Pending Orders & Discrepancies (Excel)",
+            label="📥 Download Detailed Excel QC Report",
             data=excel_buffer.getvalue(),
-            file_name=f"Order_Validation_Report_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
+            file_name=f"SLA_Validation_Report_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="dl_consolidated"
         )
+        st.markdown('</div>', unsafe_allow_html=True)
         
         # Display layout of tables
         st.markdown("### Detailed Results")
         sub_tab1, sub_tab2, sub_tab3 = st.tabs([
-            "Enriched Pending Orders", 
-            "OMS vs TC Discrepancies", 
+            "SLA Report", 
+            "Status Discrepancies", 
             "Seller Grouping & Email Center"
         ])
         
         with sub_tab1:
-            st.markdown("#### Enriched Pending Orders Report")
+            st.markdown("#### Enriched SLA Report (Main Sheet)")
             st.dataframe(enriched_df, use_container_width=True, hide_index=True)
             
         with sub_tab2:
-            st.markdown("#### Validation Failures & Status Discrepancies")
+            st.markdown("#### Validation Failures & Status Discrepancies (Separate Sheet)")
             if disc_df.empty:
                 st.success("No status discrepancies or validation failures identified!")
             else:
