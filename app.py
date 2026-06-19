@@ -51,6 +51,7 @@ else:
                 st.session_state["order_summary"] = res["summary"]
                 st.session_state["order_groups"] = res["seller_groups"]
                 st.session_state["order_id_col"] = res["pending_order_id_col"]
+                st.session_state["order_country_reports"] = res["country_reports"]
                 st.success("Validation complete! See results below.")
             except Exception as e:
                 st.error(f"Error during order processing: {str(e)}")
@@ -62,6 +63,7 @@ else:
         enriched_df = st.session_state["order_enriched_df"]
         disc_df = st.session_state["order_disc_df"]
         seller_groups = st.session_state["order_groups"]
+        country_reports = st.session_state.get("order_country_reports", {})
         
         # Display metrics
         st.markdown("### Key Metrics")
@@ -84,6 +86,17 @@ else:
             enriched_df.to_excel(writer, sheet_name="SLA Report", index=False)
             # Sheet 2: Status Discrepancies
             disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+            
+            # Country-specific Pivot and Raw Data sheets
+            for country in ["SG", "MY", "PH"]:
+                c_data = country_reports.get(country, {})
+                pivot_df = c_data.get("pivot_df", pd.DataFrame())
+                raw_df = c_data.get("raw_df", pd.DataFrame())
+                
+                if not pivot_df.empty:
+                    pivot_df.to_excel(writer, sheet_name=f"{country} Pivot", index=False)
+                if not raw_df.empty:
+                    raw_df.to_excel(writer, sheet_name=f"{country} Raw Data", index=False)
         
         st.download_button(
             label="📥 Download Detailed Excel QC Report",
