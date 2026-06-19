@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# VERSION: v1 - Order Processor & SLA Validator
+# VERSION: v4 - Final Order Processor & SLA Validator
 import pandas as pd
 import numpy as np
 import io
@@ -15,10 +15,26 @@ def _clean_str(val):
     return str(val).strip()
 
 def _clean_order_id(val):
-    # Strip any decimal part like .0 from order IDs
+    """
+    Standardizes the order number as a string. Handles potential float scientific 
+    notations introduced by Excel for numbers larger than 10 digits.
+    """
     s = _clean_str(val)
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return ""
+    
+    # Check if the string was converted to scientific notation (e.g. 2.3E+14)
+    if "e" in s.lower() and "+" in s:
+        try:
+            f_val = float(s)
+            s = str(int(f_val))
+        except Exception:
+            pass
+            
+    # Remove float decimal point representation
     if s.endswith(".0"):
         s = s[:-2]
+        
     return s
 
 def _find_column(df, candidates):
@@ -88,14 +104,7 @@ def load_file_safely(file):
 
 def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=None):
     """
-    Process Pending Order Report, TC Report, and OMS Report.
-    Returns:
-      dict: {
-         "enriched_pending_df": DataFrame,
-         "discrepancies_df": DataFrame,
-         "summary": dict,
-         "seller_groups": dict { seller_name: DataFrame }
-      }
+    Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
     """
     # == 1. Load DataFrames ====================================================
     df_pending = load_file_safely(pending_file)
@@ -104,26 +113,28 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     df_contacts = load_file_safely(contacts_file) if contacts_file is not None else pd.DataFrame()
 
     if df_pending.empty:
-        raise ValueError("Pending Order Report is empty or could not be loaded.")
+        raise ValueError("Pending Order Report (SLA Report) is empty or could not be loaded.")
     if df_tc.empty:
-        raise ValueError("TC Report is empty or could not be loaded.")
+        raise ValueError("TC Report (All file) is empty or could not be loaded.")
     if df_oms.empty:
-        raise ValueError("OMS Report is empty or could not be loaded.")
+        raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
 
-    # == 2. Standardize Columns ==============================================-
+    # == 2. Standardize Columns ===============================================
     # Pending Order columns
-    pend_id_col = _find_column(df_pending, ["Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-    pend_sla_col = _find_column(df_pending, ["SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
-    pend_store_col = _find_column(df_pending, ["Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
+    pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
     
-    # TC Report columns
-    tc_id_col = _find_column(df_tc, ["Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-    tc_status_col = _find_column(df_tc, ["TC Status", "Order Status", "Status", "TC_Status"])
-    tc_sla_col = _find_column(df_tc, ["SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
+    # TC Report columns (All file)
+    tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    tc_status_col = _find_column(df_tc, ["order_status", "TC Status", "Order Status", "Status", "TC_Status"])
+    tc_sla_col = _find_column(df_tc, ["order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
+    tc_pay_status_col = _find_column(df_tc, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"])
+    tc_pay_method_col = _find_column(df_tc, ["payment_methods", "Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
     
-    # OMS Report columns
-    oms_id_col = _find_column(df_oms, ["Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-    oms_status_col = _find_column(df_oms, ["OMS Status", "Order Status", "Status", "OMS_Status"])
+    # OMS Report columns (Sales Order file)
+    oms_id_col = _find_column(df_oms, ["order_no", "order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    oms_status_col = _find_column(df_oms, ["order_status", "OMS Status", "Order Status", "Status", "OMS_Status"])
     oms_pay_status_col = _find_column(df_oms, ["Payment Status", "Payment_Status", "PaymentStatus", "Payment"])
     oms_pay_method_col = _find_column(df_oms, ["Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
 
@@ -131,24 +142,33 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     if not pend_id_col:
         raise KeyError(f"Could not find 'Order ID' column in Pending Order Report. Available: {list(df_pending.columns)}")
     if not tc_id_col:
-        raise KeyError(f"Could not find 'Order ID' column in TC Report. Available: {list(df_tc.columns)}")
+        raise KeyError(f"Could not find 'Order ID' column in TC Report (All file). Available: {list(df_tc.columns)}")
     if not oms_id_col:
-        raise KeyError(f"Could not find 'Order ID' column in OMS Report. Available: {list(df_oms.columns)}")
+        raise KeyError(f"Could not find 'Order ID' column in OMS Report (Sales Order file). Available: {list(df_oms.columns)}")
 
-    # Clean Order IDs to ensure matches
+    # Clean Order IDs to ensure matches (retaining large string values correctly)
     df_pending[pend_id_col] = df_pending[pend_id_col].apply(_clean_order_id)
     df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
     df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
 
-    # == 3. SLA Enrichment ====================================================
-    # Build TC SLA lookup map
+    # == 3. SLA Enrichment & Pushed Status ====================================
+    # Build TC lookup maps
     tc_sla_map = {}
     if tc_sla_col:
         tc_sla_map = df_tc.set_index(tc_id_col)[tc_sla_col].dropna().to_dict()
 
-    enriched_rows = []
-    enriched_sla_count = 0
-    blank_sla_not_found = 0
+    tc_payment_status = {}
+    if tc_pay_status_col:
+        tc_payment_status = df_tc.set_index(tc_id_col)[tc_pay_status_col].dropna().to_dict()
+
+    tc_payment_method = {}
+    if tc_pay_method_col:
+        tc_payment_method = df_tc.set_index(tc_id_col)[tc_pay_method_col].dropna().to_dict()
+
+    # Build OMS status lookup maps
+    oms_status_map = df_oms.set_index(oms_id_col)[oms_status_col].dropna().to_dict() if oms_status_col else {}
+    oms_pay_status_map = df_oms.set_index(oms_id_col)[oms_pay_status_col].dropna().to_dict() if oms_pay_status_col else {}
+    oms_pay_method_map = df_oms.set_index(oms_id_col)[oms_pay_method_col].dropna().to_dict() if oms_pay_method_col else {}
 
     # Ensure SLA column exists in pending
     target_sla_col = pend_sla_col if pend_sla_col else "SLA"
@@ -160,12 +180,23 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     if target_store_col not in df_pending.columns:
         df_pending[target_store_col] = "Default Store"
 
+    # Add output columns to Pending Order Report
+    df_pending["Correct Order Number"] = df_pending[pend_id_col]
     df_pending["SLA Source"] = "Pending Report"
+    df_pending["OMS Order Status"] = ""
+    df_pending["Final Remarks"] = ""
+
+    enriched_sla_count = 0
+    blank_sla_not_found = 0
+    pushed_count = 0
+    not_pushed_count = 0
+    unpaid_count = 0
 
     for idx, row in df_pending.iterrows():
         order_id = row[pend_id_col]
         sla_val = _clean_str(row[target_sla_col])
         
+        # ── SLA Check ──
         if not sla_val: # Blank SLA
             tc_sla_val = _clean_str(tc_sla_map.get(order_id, ""))
             if tc_sla_val:
@@ -175,9 +206,39 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             else:
                 df_pending.at[idx, "SLA Source"] = "Missing (Not in TC)"
                 blank_sla_not_found += 1
+        else:
+            df_pending.at[idx, "SLA Source"] = "Pending Report"
 
-    # == 4. OMS vs TC Validations ============================================-
-    # Create indexed lookups for validations
+        # ── OMS Status & Final Remarks Check ──
+        is_in_oms = order_id in oms_status_map
+        
+        if is_in_oms:
+            oms_stat = oms_status_map[order_id]
+            df_pending.at[idx, "OMS Order Status"] = oms_stat
+            df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
+            pushed_count += 1
+        else:
+            df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+            
+            # Retrieve payment status & method from TC (All file) as fallback
+            pay_status = _clean_str(tc_payment_status.get(order_id, ""))
+            pay_method = _clean_str(tc_payment_method.get(order_id, ""))
+            
+            is_cod = any(term in pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
+            is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting"))
+            is_completed = (pay_status.lower() in ("completed", "paid", "success", "complete", "fully_paid"))
+            
+            if is_pending and not is_cod:
+                df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
+                unpaid_count += 1
+            elif (is_pending and is_cod) or is_completed or not pay_status:
+                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                not_pushed_count += 1
+            else:
+                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                not_pushed_count += 1
+
+    # == 4. Status Discrepancy Validations ====================================
     tc_lookup = {}
     for _, row in df_tc.iterrows():
         oid = row[tc_id_col]
@@ -191,126 +252,45 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         oid = row[oms_id_col]
         oms_lookup[oid] = {
             "Status": _clean_str(row[oms_status_col]) if oms_status_col else "",
-            "Payment Status": _clean_str(row[oms_pay_status_col]) if oms_pay_status_col else "",
-            "Payment Method": _clean_str(row[oms_pay_method_col]) if oms_pay_method_col else "",
             "Row": row.to_dict()
         }
 
-    # All unique order IDs across TC and OMS
-    all_order_ids = set(tc_lookup.keys()) | set(oms_lookup.keys())
+    # Compare status logic
+    all_order_ids = set(tc_lookup.keys()) & set(oms_lookup.keys()) # intersect keys
     discrepancies = []
 
     for oid in all_order_ids:
-        in_tc = oid in tc_lookup
-        in_oms = oid in oms_lookup
-        
-        tc_status = tc_lookup[oid]["Status"] if in_tc else ""
-        oms_status = oms_lookup[oid]["Status"] if in_oms else ""
-        oms_pay_status = oms_lookup[oid]["Payment Status"] if in_oms else ""
-        oms_pay_method = oms_lookup[oid]["Payment Method"] if in_oms else ""
+        tc_status = tc_lookup[oid]["Status"]
+        oms_status = oms_lookup[oid]["Status"]
 
-        # Check Payment method: is it COD?
-        is_cod = any(term in oms_pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"]) if in_oms else False
-        is_pay_pending = False
-
-        # Let's also look for payment status and payment method in TC if not in OMS
-        tc_pay_status_col = _find_column(df_tc, ["Payment Status", "Payment_Status", "PaymentStatus", "Payment"])
-        tc_pay_method_col = _find_column(df_tc, ["Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
-        
-        if in_tc:
-            tc_pay_status = _clean_str(tc_lookup[oid]["Row"].get(tc_pay_status_col, "")) if tc_pay_status_col else ""
-            tc_pay_method = _clean_str(tc_lookup[oid]["Row"].get(tc_pay_method_col, "")) if tc_pay_method_col else ""
-            
-            # If we don't have it from OMS, use TC's values
-            if not oms_pay_status:
-                oms_pay_status = tc_pay_status
-            if not oms_pay_method:
-                oms_pay_method = tc_pay_method
-                is_cod = any(term in oms_pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
-
-        # == Rule 3: Payment Pending check ==============================
-        if in_tc and tc_status.lower() == "new" and oms_pay_status.lower() == "pending" and not is_cod:
-            is_pay_pending = True
-            
-            if not in_oms:
-                discrepancies.append({
-                    "Order ID": oid,
-                    "Validation Result": "Payment Pending (Hold)",
-                    "TC Status": tc_status,
-                    "OMS Status": "Not in OMS",
-                    "Payment Status": oms_pay_status,
-                    "Payment Method": oms_pay_method if oms_pay_method else "Non-COD",
-                    "Details": "Expected hold: TC status is New, Payment Status is Pending, and Payment Method is not COD."
-                })
-                continue
-            else:
-                discrepancies.append({
-                    "Order ID": oid,
-                    "Validation Result": "Payment Pending Push Discrepancy",
-                    "TC Status": tc_status,
-                    "OMS Status": oms_status,
-                    "Payment Status": oms_pay_status,
-                    "Payment Method": oms_pay_method,
-                    "Details": "Order pushed to OMS despite TC being New, Payment Status Pending, and Method not COD."
-                })
-
-        # == Pushed Status Validation (Missing order check) ==============
-        if in_tc and not in_oms and not is_pay_pending:
-            discrepancies.append({
-                "Order ID": oid,
-                "Validation Result": "Missing in OMS",
-                "TC Status": tc_status,
-                "OMS Status": "Missing",
-                "Payment Status": oms_pay_status,
-                "Payment Method": oms_pay_method,
-                "Details": "Order exists in TC but was not successfully pushed to OMS."
-            })
-            continue
-
-        if in_oms and not in_tc:
-            discrepancies.append({
-                "Order ID": oid,
-                "Validation Result": "Missing in TC",
-                "TC Status": "Missing",
-                "OMS Status": oms_status,
-                "Payment Status": oms_pay_status,
-                "Payment Method": oms_pay_method,
-                "Details": "Order exists in OMS but does not exist in TC."
-            })
-            continue
-
-        # == Rule 1: Cancelled status check ==============================
-        is_tc_cancelled = (tc_status.lower() == "cancelled")
-        is_oms_cancelled = (oms_status.lower() == "cancelled")
+        # Rule 1: Cancelled status check
+        is_tc_cancelled = tc_status.lower() in ("cancelled", "canceled")
+        is_oms_cancelled = oms_status.lower() in ("cancelled", "canceled")
         
         if is_tc_cancelled != is_oms_cancelled:
             discrepancies.append({
                 "Order ID": oid,
                 "Validation Result": "Cancelled Sync Mismatch",
-                "TC Status": tc_status,
-                "OMS Status": oms_status,
-                "Payment Status": oms_pay_status,
-                "Payment Method": oms_pay_method,
+                "TC Status (All file)": tc_status,
+                "OMS Status (Sales Order file)": oms_status,
                 "Details": f"Cancellation mismatch: TC is {tc_status}, OMS is {oms_status}."
             })
 
-        # == Rule 2: Packed status check ================================-
+        # Rule 2: Packed status check
         if oms_status.lower() == "packed" and tc_status.lower() == "new":
             discrepancies.append({
                 "Order ID": oid,
                 "Validation Result": "OMS Packed but TC New",
-                "TC Status": tc_status,
-                "OMS Status": oms_status,
-                "Payment Status": oms_pay_status,
-                "Payment Method": oms_pay_method,
+                "TC Status (All file)": tc_status,
+                "OMS Status (Sales Order file)": oms_status,
                 "Details": "Discrepancy: OMS status is Packed, but TC status is New (must be Accepted, Picked, or Ready to Ship)."
             })
 
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
-        "Order ID", "Validation Result", "TC Status", "OMS Status", "Payment Status", "Payment Method", "Details"
+        "Order ID", "Validation Result", "TC Status (All file)", "OMS Status (Sales Order file)", "Details"
     ])
 
-    # == 5. Seller Contact Map & Grouping ====================================-
+    # == 5. Seller Contact Map & Grouping =====================================
     email_map = {}
     if not df_contacts.empty:
         c_store = _find_column(df_contacts, ["Store Name", "Store", "Seller", "Shop Name", "Shop"])
@@ -348,8 +328,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         "total_discrepancies": len(df_discrepancies),
         "cancelled_mismatches": int((df_discrepancies["Validation Result"] == "Cancelled Sync Mismatch").sum()),
         "packed_mismatches": int((df_discrepancies["Validation Result"] == "OMS Packed but TC New").sum()),
-        "payment_pending_holds": int((df_discrepancies["Validation Result"] == "Payment Pending (Hold)").sum()),
-        "missing_in_oms": int((df_discrepancies["Validation Result"] == "Missing in OMS").sum()),
+        "pushed_count": pushed_count,
+        "not_pushed_count": not_pushed_count,
+        "unpaid_count": unpaid_count,
         "total_sellers": len(seller_groups)
     }
 
