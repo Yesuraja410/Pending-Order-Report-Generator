@@ -36,24 +36,57 @@ def load_file_safely(file):
     """Load uploaded file object (CSV or Excel) into a DataFrame."""
     if file is None:
         return pd.DataFrame()
+    
     try:
         file.seek(0)
     except Exception:
         pass
+        
     name = file.name.lower()
-    raw = file.read()
-    try:
-        file.seek(0)
-    except Exception:
-        pass
+    
     try:
         if name.endswith(".csv"):
+            try:
+                file.seek(0)
+                df = pd.read_csv(file, dtype=str)
+                if not df.empty:
+                    return df
+            except Exception:
+                pass
+            
+            # Fallback to reading bytes
+            file.seek(0)
+            raw = file.read()
             return pd.read_csv(io.BytesIO(raw), dtype=str)
-        try:
-            import python_calamine
-            return pd.read_excel(io.BytesIO(raw), dtype=str, engine="calamine")
-        except ImportError:
-            return pd.read_excel(io.BytesIO(raw), dtype=str)
+        else:
+            # Excel
+            try:
+                file.seek(0)
+                df = pd.read_excel(file, dtype=str, engine="openpyxl")
+                if not df.empty:
+                    return df
+            except Exception:
+                pass
+                
+            try:
+                file.seek(0)
+                df = pd.read_excel(file, dtype=str)
+                if not df.empty:
+                    return df
+            except Exception:
+                pass
+                
+            # Fallback to reading bytes
+            file.seek(0)
+            raw = file.read()
+            try:
+                return pd.read_excel(io.BytesIO(raw), dtype=str, engine="openpyxl")
+            except Exception:
+                try:
+                    import python_calamine
+                    return pd.read_excel(io.BytesIO(raw), dtype=str, engine="calamine")
+                except Exception:
+                    return pd.read_excel(io.BytesIO(raw), dtype=str)
     except Exception as e:
         raise ValueError(f"Failed to read file {file.name}: {str(e)}")
 
