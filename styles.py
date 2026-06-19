@@ -105,16 +105,36 @@ def inject_css():
         color: #a0aec0 !important;
     }
 
-    .stDownloadButton > button {
-        background: #276749;
-        border: 1px solid #38a169;
-        color: #c6f6d5;
-        border-radius: 6px;
-        font-weight: 600;
+    /* Custom download button container matching screenshot */
+    div.stDownloadButton {
+        background-color: transparent !important;
+        border: 1.5px solid #d53f8c !important; /* bright pink/magenta border */
+        border-radius: 10px !important;
+        padding: 2px !important;
+        text-align: center !important;
+        width: 100% !important;
     }
 
-    .stDownloadButton > button:hover {
-        background: #2f855a;
+    div.stDownloadButton > button {
+        background-color: transparent !important;
+        color: #d53f8c !important; /* pink/magenta text */
+        border: none !important;
+        font-size: 1rem !important;
+        font-weight: 600 !important;
+        width: 100% !important;
+        height: 46px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 8px !important;
+        transition: all 0.3s ease !important;
+    }
+
+    div.stDownloadButton > button:hover {
+        color: #fbb6ce !important; /* light pink */
+        background-color: rgba(213, 63, 140, 0.08) !important;
+        box-shadow: 0 0 15px rgba(213, 63, 140, 0.25) !important;
+        border: none !important;
     }
     </style>
     """, unsafe_allow_html=True)
