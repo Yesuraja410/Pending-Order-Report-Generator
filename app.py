@@ -16,6 +16,7 @@ st.set_page_config(
 from styles import inject_css
 from order_processor import process_and_validate_orders
 from email_sender import test_smtp_connection, send_seller_report_email
+import excel_formatter
 
 inject_css()
 
@@ -28,7 +29,13 @@ with st.sidebar:
     st.markdown("## Configuration")
     st.markdown("Upload the daily reports below:")
     
-    order_pending = st.file_uploader("1. Pending Order Report (SLA Report)", type=["xlsx","xls","csv"], key="order_pending")
+    pending_source = st.radio("1. Pending Order Report Source", ["Upload File", "Google Sheet Link"], index=0)
+    if pending_source == "Upload File":
+        order_pending = st.file_uploader("Upload Pending Order Report (SLA Report)", type=["xlsx","xls","csv"], key="order_pending")
+    else:
+        gsheet_url = st.text_input("Enter Google Sheet Link", placeholder="https://docs.google.com/spreadsheets/d/...")
+        order_pending = gsheet_url if gsheet_url.strip() else None
+        
     order_tc = st.file_uploader("2. TC Report (All file)", type=["xlsx","xls","csv"], key="order_tc")
     order_oms = st.file_uploader("3. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
     seller_contacts = st.file_uploader("4. Seller Contact List (Optional)", type=["xlsx","xls","csv"], key="seller_contacts")
@@ -52,6 +59,7 @@ else:
                 st.session_state["order_groups"] = res["seller_groups"]
                 st.session_state["order_id_col"] = res["pending_order_id_col"]
                 st.session_state["order_country_reports"] = res["country_reports"]
+                st.session_state["order_ref_date_dmy"] = res.get("ref_date_dmy", "")
                 st.success("Validation complete! See results below.")
             except Exception as e:
                 st.error(f"Error during order processing: {str(e)}")
@@ -77,8 +85,37 @@ else:
                   delta_color="inverse")
         
         # Download Section matching screenshot
+        # Country-specific reports download container
         st.markdown('<div class="download-container">', unsafe_allow_html=True)
-        st.markdown('<h3 class="download-header">📥 Download Validation Reports</h3>', unsafe_allow_html=True)
+        st.markdown('<h3 class="download-header">📥 Download Country SLA & Pivot Reports (Styled)</h3>', unsafe_allow_html=True)
+        
+        c_cols = st.columns(3)
+        ref_date_dmy = st.session_state.get("order_ref_date_dmy", "")
+        for idx, country in enumerate(["SG", "MY", "PH"]):
+            c_data = country_reports.get(country, {})
+            raw_df = c_data.get("raw_df", pd.DataFrame())
+            pivot_df = c_data.get("pivot_df", pd.DataFrame())
+            summary_df = c_data.get("summary_df", pd.DataFrame())
+            
+            if not raw_df.empty:
+                wb = excel_formatter.generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_dmy)
+                c_buffer = io.BytesIO()
+                wb.save(c_buffer)
+                
+                with c_cols[idx]:
+                    st.download_button(
+                        label=f"📥 Download {country} Report",
+                        data=c_buffer.getvalue(),
+                        file_name=f"SLA_Validation_Report_{country}_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key=f"dl_{country}"
+                    )
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Consolidated download container
+        st.markdown('<div class="download-container">', unsafe_allow_html=True)
+        st.markdown('<h3 class="download-header">📥 Download Consolidated QC Report</h3>', unsafe_allow_html=True)
         
         excel_buffer = io.BytesIO()
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
@@ -86,6 +123,10 @@ else:
             enriched_df.to_excel(writer, sheet_name="SLA Report", index=False)
             # Sheet 2: Status Discrepancies
             disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+            
+            # Format using excel_formatter
+            excel_formatter.format_data_sheet(writer.sheets["SLA Report"], enriched_df)
+            excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
             
             # Country-specific Pivot and Raw Data sheets
             for country in ["SG", "MY", "PH"]:
@@ -113,7 +154,7 @@ else:
         st.download_button(
             label="📥 Download Detailed Excel QC Report",
             data=excel_buffer.getvalue(),
-            file_name=f"SLA_Validation_Report_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
+            file_name=f"SLA_Validation_Report_Consolidated_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="dl_consolidated"
