@@ -190,7 +190,8 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
                                 cell.fill = FILL_RED
                                 cell.font = FONT_WHITE_BOLD
                                 
-    # ── Highlight Metrics Table (Starting at Column K, Row 4) ──
+    # ── Highlight Metrics Table (Starting after the Pivot Table with 1 column gap) ──
+    start_col = (len(pivot_df.columns) + 2) if not pivot_df.empty else 11
     metrics_map = {}
     if not summary_df.empty:
         metrics_map = summary_df.set_index("Metric")["Count"].to_dict()
@@ -206,19 +207,19 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
     for idx, (original_name, display_name, fill, font) in enumerate(metrics_list):
         row_pos = 4 + idx
         
-        # Metric Label (Col K)
-        cell_lbl = ws_summary.cell(row=row_pos, column=11, value=display_name)
+        # Metric Label
+        cell_lbl = ws_summary.cell(row=row_pos, column=start_col, value=display_name)
         cell_lbl.fill = fill
         cell_lbl.font = font
         cell_lbl.alignment = Alignment(horizontal='left', vertical='center')
         cell_lbl.border = thin_border
         
-        # Metric Value (Col L)
+        # Metric Value
         val = metrics_map.get(original_name, 0)
         if display_name == "Not reflected in OMS" and (val == 0 or val == "-"):
             val = "-"
             
-        cell_val = ws_summary.cell(row=row_pos, column=12, value=val)
+        cell_val = ws_summary.cell(row=row_pos, column=start_col + 1, value=val)
         cell_val.font = FONT_BOLD
         cell_val.alignment = Alignment(horizontal='center', vertical='center')
         cell_val.border = thin_border
