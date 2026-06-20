@@ -83,6 +83,31 @@ def _find_column(df, candidates):
                 return col
     return None
 
+def _is_blank(val):
+    """Check if a value is null, empty string, or nan/nat strings produced by Excel loading."""
+    s = str(val).strip().replace('\r', '').replace('\n', '')
+    return not s or s.lower() in ("nan", "none", "nat", "null", "undefined", "nat")
+
+def extract_date(val):
+    """Extract a YYYY-MM-DD date from various timestamp formats."""
+    s = str(val).strip()
+    if len(s) >= 10:
+        if '-' in s:
+            parts = s.split(' ')[0].split('-')
+            if len(parts) == 3:
+                if len(parts[0]) == 4:
+                    return f"{parts[0]}-{parts[1]}-{parts[2]}"
+                else:
+                    return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        elif '/' in s:
+            parts = s.split(' ')[0].split('/')
+            if len(parts) == 3:
+                if len(parts[2]) == 4:
+                    return f"{parts[2]}-{parts[1]}-{parts[0]}"
+                else:
+                    return f"{parts[0]}-{parts[1]}-{parts[2]}"
+    return s
+
 def load_file_safely(file):
     """Load uploaded file object (CSV or Excel) into a DataFrame. Scans sheets if Excel."""
     if file is None:
@@ -254,12 +279,12 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
 
     for idx, row in df_pending.iterrows():
         order_id = row[pend_id_col]
-        sla_val = _clean_str(row[target_sla_col])
+        sla_val = row[target_sla_col]
         
         # ── SLA Check ──
-        if not sla_val: # Blank SLA
+        if _is_blank(sla_val): # Blank SLA (recognizing "NaT", "nan" loaded via dtype=str)
             tc_sla_val = _clean_str(tc_sla_map.get(order_id, ""))
-            if tc_sla_val:
+            if not _is_blank(tc_sla_val):
                 df_pending.at[idx, target_sla_col] = tc_sla_val
                 df_pending.at[idx, "SLA Source"] = "Enriched from TC"
                 enriched_sla_count += 1
@@ -396,6 +421,14 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
 
     # == 6. Country-specific datasets & Pivot Tables ==========================
     country_reports = {}
+    
+    # Pre-calculate clean Order Date for columns
+    date_col = _find_column(df_pending, ["ordered_date", "Order Date", "Date", "Created Date"])
+    if date_col:
+        df_pending["Order Date"] = df_pending[date_col].apply(extract_date)
+    else:
+        df_pending["Order Date"] = "Unknown"
+    
     for country in ["SG", "MY", "PH"]:
         c_rows = []
         for idx, row in df_pending.iterrows():
@@ -403,9 +436,6 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             c_code, chan = parse_country_and_channel(store_val)
             if c_code == country:
                 # Apply channel filter requirements:
-                # SG: Lazada, Shopee, Zalora
-                # MY: Lazada, Shopee, Zalora, TikTok
-                # PH: Lazada, Shopee, Zalora (TikTok PH already ignored at start)
                 if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
                     row_dict = row.to_dict()
                     row_dict["Country"] = country
@@ -424,27 +454,40 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                     
         country_df = pd.DataFrame(c_rows)
         if not country_df.empty:
-            # Pivot table: Channel vs Final Remarks
+            # Pivot table: Channel & OMS status in Rows, Order date in Columns, Order number (count) in Values
             pivot_df = country_df.pivot_table(
-                index="Channel",
-                columns="Final Remarks",
+                index=["Channel", "OMS Order Status"],
+                columns="Order Date",
                 values="Correct Order Number",
                 aggfunc="count",
                 fill_value=0
             )
-            # Add Grand Totals
+            # Add Grand Total column
             pivot_df["Grand Total"] = pivot_df.sum(axis=1)
-            pivot_df.loc["Grand Total"] = pivot_df.sum(axis=0)
+            # Add Grand Total row
+            pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
             pivot_df = pivot_df.reset_index()
+            
+            # Highlight Summary metrics
+            summary_metrics = [
+                {"Metric": "Overdue (SLA breached)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "breached").sum()) if "sla_status" in country_df else 0},
+                {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum()) if "sla_status" in country_df else 0},
+                {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
+                {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum()) if "sla_status" in country_df else 0},
+                {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())}
+            ]
+            summary_df = pd.DataFrame(summary_metrics)
             
             country_reports[country] = {
                 "raw_df": country_df,
-                "pivot_df": pivot_df
+                "pivot_df": pivot_df,
+                "summary_df": summary_df
             }
         else:
             country_reports[country] = {
                 "raw_df": pd.DataFrame(),
-                "pivot_df": pd.DataFrame()
+                "pivot_df": pd.DataFrame(),
+                "summary_df": pd.DataFrame()
             }
 
     # Summary metrics
