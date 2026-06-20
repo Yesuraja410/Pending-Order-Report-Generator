@@ -64,6 +64,16 @@ def _clean_str(val):
         pass
     return str(val).strip()
 
+def _normalize_status_val(val):
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(val).strip().lower().replace("_", " ").replace("-", " ")
+
 def _clean_order_id(val):
     """
     Standardizes the order number as a string. Handles potential float scientific 
@@ -454,13 +464,24 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     for oid in all_order_ids:
         tc_status = tc_lookup[oid]["Status"]
         oms_status = oms_lookup[oid]["Status"]
+        
+        tc_norm = _normalize_status_val(tc_status)
+        oms_norm = _normalize_status_val(oms_status)
+
+        # 1. Ignore exception: OMS is Shipped and TC is RETURN REQUESTED, CANCELLED, SHIPPED (or combination CANCELLED,SHIPPED)
+        # We split by comma to handle comma-separated combinations like CANCELLED,SHIPPED
+        tc_parts = [p.strip() for p in tc_norm.split(",") if p.strip()]
+        if oms_norm == "shipped" and (
+            not tc_parts or all(part in ("shipped", "return requested", "cancelled", "canceled") for part in tc_parts)
+        ):
+            continue
 
         # Rule 1: Cancelled status check
-        is_tc_cancelled = tc_status.lower() in ("cancelled", "canceled")
-        is_oms_cancelled = oms_status.lower() in ("cancelled", "canceled")
+        is_tc_cancelled = ("cancel" in tc_norm)
+        is_oms_cancelled = ("cancel" in oms_norm)
         
         # Exception: TC status is Cancelled and OMS is Returned/Return -> Ignore mismatch!
-        is_tc_cancelled_and_oms_returned = is_tc_cancelled and (oms_status.lower() in ("returned", "return"))
+        is_tc_cancelled_and_oms_returned = is_tc_cancelled and ("return" in oms_norm)
         
         if is_tc_cancelled != is_oms_cancelled and not is_tc_cancelled_and_oms_returned:
             discrepancies.append({
@@ -472,7 +493,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             })
 
         # Rule 2: Packed status check
-        if oms_status.lower() == "packed" and tc_status.lower() == "new":
+        if oms_norm == "packed" and tc_norm == "new":
             discrepancies.append({
                 "Order ID": oid,
                 "Validation Result": "OMS Packed but TC New",
@@ -482,7 +503,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             })
 
         # Rule 3: Shipped status check
-        if oms_status.lower() == "shipped" and tc_status.lower() != "shipped":
+        if oms_norm == "shipped":
+            # TC must have shipped or be in ignored status list. Since ignored list is handled above,
+            # if we reached here, TC is not in ignored list and OMS is Shipped, so it's a mismatch!
             discrepancies.append({
                 "Order ID": oid,
                 "Validation Result": "OMS Shipped but TC not Shipped",
@@ -490,6 +513,30 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 "OMS Status (Sales Order file)": oms_status,
                 "Details": f"Discrepancy: OMS status is Shipped, but TC status is '{tc_status}' (must be Shipped)."
             })
+
+        # Rule 4: Delivered status check
+        # Flag if TC is Delivered (contains "delivered") and OMS is New, Processing, Picked, Packed, Shipped
+        if "delivered" in tc_parts:
+            if oms_norm in ("new", "processing", "picked", "packed", "shipped"):
+                discrepancies.append({
+                    "Order ID": oid,
+                    "Validation Result": "TC Delivered but OMS not Delivered",
+                    "TC Status (All file)": tc_status,
+                    "OMS Status (Sales Order file)": oms_status,
+                    "Details": f"Discrepancy: TC status is Delivered, but OMS status is '{oms_status}' (should be Delivered)."
+                })
+
+        # Rule 5: Returned status check
+        # Flag if TC is Returned (contains "returned") and OMS is not Returned/Return
+        if "returned" in tc_parts:
+            if not ("returned" in oms_norm or "return" in oms_norm):
+                discrepancies.append({
+                    "Order ID": oid,
+                    "Validation Result": "TC Returned but OMS not Returned",
+                    "TC Status (All file)": tc_status,
+                    "OMS Status (Sales Order file)": oms_status,
+                    "Details": f"Discrepancy: TC status is Returned, but OMS status is '{oms_status}' (should be Returned)."
+                })
 
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
         "Order ID", "Validation Result", "TC Status (All file)", "OMS Status (Sales Order file)", "Details"
