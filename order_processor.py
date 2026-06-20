@@ -439,31 +439,62 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
 
     # == 4. Status Discrepancy Validations ====================================
+    # Identify item-level columns
+    tc_custom_sku_col = _find_column(df_tc, ["custom_sku", "customSku", "custom_SKU", "sku"])
+    tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
+    
+    oms_ean_col = _find_column(df_oms, ["ean", "sku", "OMS sku"])
+    oms_line_status_col = _find_column(df_oms, ["line_status", "order_status", "item_status"])
+
+    # Fallbacks if columns are not resolved
+    if not tc_custom_sku_col:
+        tc_custom_sku_col = tc_id_col
+    if not tc_item_status_col:
+        tc_item_status_col = tc_status_col
+        
+    if not oms_ean_col:
+        oms_ean_col = oms_id_col
+    if not oms_line_status_col:
+        oms_line_status_col = oms_status_col
+
     tc_lookup = {}
     for _, row in df_tc.iterrows():
-        oid = row[tc_id_col]
-        tc_lookup[oid] = {
-            "Status": _clean_str(row[tc_status_col]) if tc_status_col else "",
-            "Row": row.to_dict()
-        }
+        oid = _clean_order_id(row[tc_id_col])
+        sku = _clean_str(row[tc_custom_sku_col])
+        status = _clean_str(row[tc_item_status_col])
+        if oid and sku:
+            key = f"{oid}_{sku}"
+            tc_lookup[key] = {
+                "Order ID": oid,
+                "SKU": sku,
+                "Status": status,
+                "Row": row.to_dict()
+            }
 
     oms_lookup = {}
     for _, row in df_oms.iterrows():
-        oid_raw = row[oms_id_col]
-        # Map OMS package number back to TC order_id to align keys correctly for Zalora
+        oid_raw = _clean_order_id(row[oms_id_col])
         oid = tc_num_to_id.get(oid_raw, oid_raw)
-        oms_lookup[oid] = {
-            "Status": _clean_str(row[oms_status_col]) if oms_status_col else "",
-            "Row": row.to_dict()
-        }
+        ean = _clean_str(row[oms_ean_col])
+        status = _clean_str(row[oms_line_status_col])
+        if oid and ean:
+            key = f"{oid}_{ean}"
+            oms_lookup[key] = {
+                "Order ID": oid,
+                "SKU": ean,
+                "Status": status,
+                "Row": row.to_dict()
+            }
 
     # Compare status logic
-    all_order_ids = set(tc_lookup.keys()) & set(oms_lookup.keys()) # intersect keys
+    all_keys = set(tc_lookup.keys()) & set(oms_lookup.keys()) # intersect line item keys
     discrepancies = []
 
-    for oid in all_order_ids:
-        tc_status = tc_lookup[oid]["Status"]
-        oms_status = oms_lookup[oid]["Status"]
+    for key in all_keys:
+        tc_status = tc_lookup[key]["Status"]
+        oms_status = oms_lookup[key]["Status"]
+        oid = tc_lookup[key]["Order ID"]
+        sku = tc_lookup[key]["SKU"]
         
         tc_norm = _normalize_status_val(tc_status)
         oms_norm = _normalize_status_val(oms_status)
@@ -486,20 +517,22 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         if is_tc_cancelled != is_oms_cancelled and not is_tc_cancelled_and_oms_returned:
             discrepancies.append({
                 "Order ID": oid,
+                "SKU": sku,
                 "Validation Result": "Cancelled Sync Mismatch",
                 "TC Status (All file)": tc_status,
                 "OMS Status (Sales Order file)": oms_status,
-                "Details": f"Cancellation mismatch: TC is {tc_status}, OMS is {oms_status}."
+                "Details": f"Cancellation mismatch for item {sku}: TC is {tc_status}, OMS is {oms_status}."
             })
 
         # Rule 2: Packed status check
         if oms_norm == "packed" and tc_norm == "new":
             discrepancies.append({
                 "Order ID": oid,
+                "SKU": sku,
                 "Validation Result": "OMS Packed but TC New",
                 "TC Status (All file)": tc_status,
                 "OMS Status (Sales Order file)": oms_status,
-                "Details": "Discrepancy: OMS status is Packed, but TC status is New (must be Accepted, Picked, or Ready to Ship)."
+                "Details": f"Discrepancy for item {sku}: OMS status is Packed, but TC status is New."
             })
 
         # Rule 3: Shipped status check
@@ -508,10 +541,11 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             # if we reached here, TC is not in ignored list and OMS is Shipped, so it's a mismatch!
             discrepancies.append({
                 "Order ID": oid,
+                "SKU": sku,
                 "Validation Result": "OMS Shipped but TC not Shipped",
                 "TC Status (All file)": tc_status,
                 "OMS Status (Sales Order file)": oms_status,
-                "Details": f"Discrepancy: OMS status is Shipped, but TC status is '{tc_status}' (must be Shipped)."
+                "Details": f"Discrepancy for item {sku}: OMS status is Shipped, but TC status is '{tc_status}'."
             })
 
         # Rule 4: Delivered status check
@@ -520,10 +554,11 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             if oms_norm in ("new", "processing", "picked", "packed", "shipped"):
                 discrepancies.append({
                     "Order ID": oid,
+                    "SKU": sku,
                     "Validation Result": "TC Delivered but OMS not Delivered",
                     "TC Status (All file)": tc_status,
                     "OMS Status (Sales Order file)": oms_status,
-                    "Details": f"Discrepancy: TC status is Delivered, but OMS status is '{oms_status}' (should be Delivered)."
+                    "Details": f"Discrepancy for item {sku}: TC status is Delivered, but OMS status is '{oms_status}'."
                 })
 
         # Rule 5: Returned status check
@@ -532,14 +567,15 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             if not ("returned" in oms_norm or "return" in oms_norm):
                 discrepancies.append({
                     "Order ID": oid,
+                    "SKU": sku,
                     "Validation Result": "TC Returned but OMS not Returned",
                     "TC Status (All file)": tc_status,
                     "OMS Status (Sales Order file)": oms_status,
-                    "Details": f"Discrepancy: TC status is Returned, but OMS status is '{oms_status}' (should be Returned)."
+                    "Details": f"Discrepancy for item {sku}: TC status is Returned, but OMS status is '{oms_status}'."
                 })
 
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
-        "Order ID", "Validation Result", "TC Status (All file)", "OMS Status (Sales Order file)", "Details"
+        "Order ID", "SKU", "Validation Result", "TC Status (All file)", "OMS Status (Sales Order file)", "Details"
     ])
 
     # == 5. Seller Contact Map & Grouping =====================================
