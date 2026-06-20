@@ -110,9 +110,8 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
     ws_summary.title = "Summary"
     ws_summary.views.sheetView[0].showGridLines = True
     
-    # ── Title Block at A2:I2 ──
-    pivot_cols_count = len(pivot_df.columns) if not pivot_df.empty else 9
-    title_end_col = max(pivot_cols_count, 9)
+    # ── Title Block merged to match the pivot table width ──
+    title_end_col = len(pivot_df.columns) if not pivot_df.empty else 6
     ws_summary.merge_cells(start_row=2, start_column=1, end_row=2, end_column=title_end_col)
     
     title_cell = ws_summary.cell(row=2, column=1, value=f"Pending Orders - PUMA {country}")
