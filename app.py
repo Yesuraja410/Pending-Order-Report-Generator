@@ -106,7 +106,7 @@ else:
                     st.download_button(
                         label=f"📥 Download {country} Report",
                         data=c_buffer.getvalue(),
-                        file_name=f"SLA_Validation_Report_{country}_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
+                        file_name=f"Pending order report - {country} {ref_date_dmy if ref_date_dmy else datetime.today().strftime('%d-%m-%Y')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True,
                         key=f"dl_{country}"
@@ -154,7 +154,7 @@ else:
         st.download_button(
             label="📥 Download Detailed Excel QC Report",
             data=excel_buffer.getvalue(),
-            file_name=f"SLA_Validation_Report_Consolidated_{datetime.today().strftime('%Y-%m-%d')}.xlsx",
+            file_name=f"Pending order report - Consolidated {ref_date_dmy if ref_date_dmy else datetime.today().strftime('%d-%m-%Y')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="dl_consolidated"
