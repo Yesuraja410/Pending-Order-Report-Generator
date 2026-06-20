@@ -7,6 +7,7 @@ import pandas as pd
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
+import excel_formatter
 
 def test_smtp_connection(host, port, user, password, use_tls=True):
     """Test connection to the SMTP server."""
@@ -50,6 +51,8 @@ def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_d
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         seller_df.to_excel(writer, sheet_name="Pending Orders", index=False)
+        excel_formatter.format_data_sheet(writer.sheets["Pending Orders"], seller_df)
+        
         if discrepancies_df is not None and not discrepancies_df.empty:
             # Filter discrepancies for this seller's orders
             order_ids = set(seller_df.iloc[:, 0].dropna().apply(lambda x: str(x).strip()).tolist())
@@ -60,6 +63,7 @@ def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_d
                 seller_disc = discrepancies_df[discrepancies_df[disc_id_col].astype(str).str.strip().isin(order_ids)]
                 if not seller_disc.empty:
                     seller_disc.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+                    excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], seller_disc)
                     
     excel_data = excel_buffer.getvalue()
 
