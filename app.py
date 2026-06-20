@@ -128,28 +128,32 @@ else:
             excel_formatter.format_data_sheet(writer.sheets["SLA Report"], enriched_df)
             excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
             
-            # Country-specific Pivot and Raw Data sheets
+            # Country-specific styled Summary and Data sheets
             for country in ["SG", "MY", "PH"]:
                 c_data = country_reports.get(country, {})
                 pivot_df = c_data.get("pivot_df", pd.DataFrame())
                 raw_df = c_data.get("raw_df", pd.DataFrame())
                 summary_df = c_data.get("summary_df", pd.DataFrame())
                 
-                if not summary_df.empty or not pivot_df.empty:
-                    sheet_name = f"{country} Pivot"
-                    # Write Summary Metrics first
-                    if not summary_df.empty:
-                        pd.Series([f"Summary Highlight Metrics - {country}"]).to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=0, startcol=0)
-                        summary_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1, startcol=0)
-                    
-                    # Write Pivot Table after leaving 2 blank rows
-                    start_row = len(summary_df) + 4 if not summary_df.empty else 0
-                    if not pivot_df.empty:
-                        pd.Series([f"Channel & OMS Status Pivot Table - {country}"]).to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=start_row, startcol=0)
-                        pivot_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=start_row + 1, startcol=0)
-                
                 if not raw_df.empty:
-                    raw_df.to_excel(writer, sheet_name=f"{country} Raw Data", index=False)
+                    excel_formatter.add_country_sheets_to_workbook(
+                        writer.book, country, raw_df, pivot_df, summary_df, ref_date_dmy
+                    )
+            
+            # Reorder sheets to show all summaries first, then main reports, then data sheets
+            wb = writer.book
+            sheet_order = []
+            for c in ["SG", "MY", "PH"]:
+                if f"{c} Summary" in wb.sheetnames:
+                    sheet_order.append(wb[f"{c} Summary"])
+            if "SLA Report" in wb.sheetnames:
+                sheet_order.append(wb["SLA Report"])
+            if "Status Discrepancies" in wb.sheetnames:
+                sheet_order.append(wb["Status Discrepancies"])
+            for c in ["SG", "MY", "PH"]:
+                if f"{c} Data" in wb.sheetnames:
+                    sheet_order.append(wb[f"{c} Data"])
+            wb._sheets = sheet_order
         
         st.download_button(
             label="📥 Download Detailed Excel QC Report",
