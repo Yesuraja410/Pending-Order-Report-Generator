@@ -168,7 +168,7 @@ def load_file_safely(file):
     except Exception:
         pass
         
-    name = file.name.lower()
+    name = getattr(file, "name", "google_sheet.xlsx").lower()
     
     try:
         if name.endswith(".csv"):
@@ -210,7 +210,7 @@ def load_file_safely(file):
                 return xl.parse(xl.sheet_names[0], dtype=str)
             return pd.DataFrame()
     except Exception as e:
-        raise ValueError(f"Failed to read file {file.name}: {str(e)}")
+        raise ValueError(f"Failed to read file {getattr(file, 'name', 'Google Sheet')}: {str(e)}")
 
 def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=None):
     """
