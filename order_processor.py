@@ -323,6 +323,12 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     df_pending["OMS Order Status"] = ""
     df_pending["Final Remarks"] = ""
 
+    # Clean Store Name / nickname column to remove PUMA_ prefix case-insensitively
+    if target_store_col in df_pending.columns:
+        df_pending[target_store_col] = df_pending[target_store_col].apply(
+            lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
+        )
+
     # Determine reference date from "Today" rows or data
     ref_date = None
     if "sla_status" in df_pending.columns:
@@ -417,6 +423,10 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             else:
                 df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
                 not_pushed_count += 1
+
+    # Format SLA Date column to show only Date (no Time) in output report
+    if target_sla_col in df_pending.columns:
+        df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
 
     # == 4. Status Discrepancy Validations ====================================
     tc_lookup = {}
@@ -531,6 +541,13 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             store_val = _clean_str(row[target_store_col])
             c_code, chan = parse_country_and_channel(store_val)
             if c_code == country:
+                final_rem = _clean_str(row.get("Final Remarks", ""))
+                oms_stat = _clean_str(row.get("OMS Order Status", ""))
+                
+                # Ignore Unpaid orders and OMS shipped orders in country wise output reports
+                if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
+                    continue
+                    
                 # Apply channel filter requirements:
                 if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
                     row_dict = row.to_dict()
@@ -585,8 +602,12 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             ]
             summary_df = pd.DataFrame(summary_metrics)
             
+            # Drop unwanted columns from raw sheet data
+            cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel"]
+            country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
+            
             country_reports[country] = {
-                "raw_df": country_df,
+                "raw_df": country_df_export,
                 "pivot_df": pivot_df,
                 "summary_df": summary_df
             }
