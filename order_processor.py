@@ -5,6 +5,7 @@ import numpy as np
 import io
 import re
 import urllib.request
+import urllib.error
 from datetime import datetime
 
 def get_google_sheet_download_url(url):
@@ -27,6 +28,14 @@ def download_google_sheet(url):
         with urllib.request.urlopen(req) as response:
             data = response.read()
         return io.BytesIO(data)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ValueError(
+                "Failed to download Google Sheet: Access Denied (HTTP 401/403 Unauthorized). "
+                "Please ensure that the sharing settings of your Google Sheet are set to "
+                "'Anyone with the link can view' or 'Anyone with the link can edit' (restricted sheets require auth, which is not supported)."
+            )
+        raise ValueError(f"Failed to download Google Sheet: HTTP Error {e.code} - {e.reason}")
     except Exception as e:
         raise ValueError(f"Failed to download Google Sheet from URL: {str(e)}")
 
@@ -460,6 +469,16 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 "TC Status (All file)": tc_status,
                 "OMS Status (Sales Order file)": oms_status,
                 "Details": "Discrepancy: OMS status is Packed, but TC status is New (must be Accepted, Picked, or Ready to Ship)."
+            })
+
+        # Rule 3: Shipped status check
+        if oms_status.lower() == "shipped" and tc_status.lower() != "shipped":
+            discrepancies.append({
+                "Order ID": oid,
+                "Validation Result": "OMS Shipped but TC not Shipped",
+                "TC Status (All file)": tc_status,
+                "OMS Status (Sales Order file)": oms_status,
+                "Details": f"Discrepancy: OMS status is Shipped, but TC status is '{tc_status}' (must be Shipped)."
             })
 
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
