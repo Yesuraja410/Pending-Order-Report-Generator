@@ -92,9 +92,21 @@ else:
                 c_data = country_reports.get(country, {})
                 pivot_df = c_data.get("pivot_df", pd.DataFrame())
                 raw_df = c_data.get("raw_df", pd.DataFrame())
+                summary_df = c_data.get("summary_df", pd.DataFrame())
                 
-                if not pivot_df.empty:
-                    pivot_df.to_excel(writer, sheet_name=f"{country} Pivot", index=False)
+                if not summary_df.empty or not pivot_df.empty:
+                    sheet_name = f"{country} Pivot"
+                    # Write Summary Metrics first
+                    if not summary_df.empty:
+                        pd.Series([f"Summary Highlight Metrics - {country}"]).to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=0, startcol=0)
+                        summary_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1, startcol=0)
+                    
+                    # Write Pivot Table after leaving 2 blank rows
+                    start_row = len(summary_df) + 4 if not summary_df.empty else 0
+                    if not pivot_df.empty:
+                        pd.Series([f"Channel & OMS Status Pivot Table - {country}"]).to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=start_row, startcol=0)
+                        pivot_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=start_row + 1, startcol=0)
+                
                 if not raw_df.empty:
                     raw_df.to_excel(writer, sheet_name=f"{country} Raw Data", index=False)
         
@@ -110,10 +122,11 @@ else:
         
         # Display layout of tables
         st.markdown("### Detailed Results")
-        sub_tab1, sub_tab2, sub_tab3 = st.tabs([
+        sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs([
             "SLA Report", 
             "Status Discrepancies", 
-            "Seller Grouping & Email Center"
+            "Seller Grouping & Email Center",
+            "Country Pivots & Highlights"
         ])
         
         with sub_tab1:
@@ -128,6 +141,39 @@ else:
                 st.warning(f"Found {len(disc_df)} discrepancies/warnings.")
                 st.dataframe(disc_df, use_container_width=True, hide_index=True)
                 
+        with sub_tab4:
+            st.markdown("#### Country Pivots & Highlight Metrics")
+            country_sel = st.selectbox("Select Country to View Summary & Pivot", ["SG", "MY", "PH"])
+            
+            c_data = country_reports.get(country_sel, {})
+            c_summary = c_data.get("summary_df", pd.DataFrame())
+            c_pivot = c_data.get("pivot_df", pd.DataFrame())
+            c_raw = c_data.get("raw_df", pd.DataFrame())
+            
+            if c_summary.empty and c_pivot.empty:
+                st.info(f"No order data found for country {country_sel}.")
+            else:
+                # 1. Highlight metrics using st.columns & metric cards
+                st.markdown(f"##### Highlight Metrics for {country_sel}")
+                
+                # Fetch count for each metric
+                metrics_dict = c_summary.set_index("Metric")["Count"].to_dict() if not c_summary.empty else {}
+                
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Overdue (SLA breached)", metrics_dict.get("Overdue (SLA breached)", 0), delta="Breached" if metrics_dict.get("Overdue (SLA breached)", 0) > 0 else None, delta_color="inverse")
+                c2.metric("Handover Today (Today SLA)", metrics_dict.get("Handover today (Today SLA)", 0))
+                c3.metric("Order Status at New", metrics_dict.get("Order Status at New", 0))
+                c4.metric("Within SLA (Future)", metrics_dict.get("Within SLA (Future)", 0))
+                c5.metric("Not reflecting in OM", metrics_dict.get("Not reflecting in OM", 0))
+                
+                # 2. Display Pivot Table
+                st.markdown(f"##### Pivot Table: Channel & OMS Status vs Dates ({country_sel})")
+                st.dataframe(c_pivot, use_container_width=True, hide_index=True)
+                
+                # 3. Display Raw Data
+                with st.expander(f"View Raw Data ({country_sel})"):
+                    st.dataframe(c_raw, use_container_width=True, hide_index=True)
+                    
         with sub_tab3:
             st.markdown("#### SMTP Email Configuration")
             # Load credentials from secrets or default to empty
