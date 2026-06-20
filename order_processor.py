@@ -1,8 +1,49 @@
 # -*- coding: utf-8 -*-
-# VERSION: v4 - Final Order Processor & SLA Validator
+# VERSION: v5 - Google Sheets & Excel Styling Update
 import pandas as pd
 import numpy as np
 import io
+import re
+import urllib.request
+from datetime import datetime
+
+def get_google_sheet_download_url(url):
+    pattern = r"/spreadsheets/d/([a-zA-Z0-9-_]+)"
+    match = re.search(pattern, url)
+    if match:
+        spreadsheet_id = match.group(1)
+        return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=xlsx"
+    return None
+
+def download_google_sheet(url):
+    download_url = get_google_sheet_download_url(url)
+    if not download_url:
+        download_url = url
+    try:
+        req = urllib.request.Request(
+            download_url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        )
+        with urllib.request.urlopen(req) as response:
+            data = response.read()
+        return io.BytesIO(data)
+    except Exception as e:
+        raise ValueError(f"Failed to download Google Sheet from URL: {str(e)}")
+
+def compute_sla_status(sla_date, ref_date):
+    if _is_blank(sla_date) or _is_blank(ref_date):
+        return ""
+    s_dt = extract_date(sla_date)
+    r_dt = extract_date(ref_date)
+    if not (len(s_dt) == 10 and len(r_dt) == 10):
+        return ""
+    if s_dt < r_dt:
+        return "Breached"
+    elif s_dt == r_dt:
+        return "Today"
+    else:
+        return "Future"
+
 
 def _clean_str(val):
     if val is None:
@@ -167,6 +208,8 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
     """
     # == 1. Load DataFrames ====================================================
+    if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
+        pending_file = download_google_sheet(pending_file)
     df_pending = load_file_safely(pending_file)
     df_tc = load_file_safely(tc_file)
     df_oms = load_file_safely(oms_file)
@@ -271,6 +314,32 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     df_pending["OMS Order Status"] = ""
     df_pending["Final Remarks"] = ""
 
+    # Determine reference date from "Today" rows or data
+    ref_date = None
+    if "sla_status" in df_pending.columns:
+        today_rows = df_pending[df_pending["sla_status"].astype(str).str.strip().str.lower() == "today"]
+        if not today_rows.empty:
+            for val in today_rows[target_sla_col]:
+                if not _is_blank(val):
+                    p_dt = extract_date(val)
+                    if len(p_dt) == 10:
+                        ref_date = p_dt
+                        break
+    if not ref_date:
+        if target_sla_col in df_pending.columns:
+            for val in df_pending[target_sla_col]:
+                if not _is_blank(val):
+                    p_dt = extract_date(val)
+                    if len(p_dt) == 10:
+                        ref_date = p_dt
+                        break
+    if not ref_date:
+        ref_date = datetime.today().strftime('%Y-%m-%d')
+
+    # Ensure sla_status column exists in df_pending
+    if "sla_status" not in df_pending.columns:
+        df_pending["sla_status"] = ""
+
     enriched_sla_count = 0
     blank_sla_not_found = 0
     pushed_count = 0
@@ -293,6 +362,14 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 blank_sla_not_found += 1
         else:
             df_pending.at[idx, "SLA Source"] = "Pending Report"
+
+        # Update/Compute sla_status for blanks/enriched or if not present
+        sla_status_val = row.get("sla_status", "")
+        if _is_blank(sla_status_val):
+            curr_sla = df_pending.at[idx, target_sla_col]
+            calculated_status = compute_sla_status(curr_sla, ref_date)
+            if calculated_status:
+                df_pending.at[idx, "sla_status"] = calculated_status
 
         # ── OMS Status & Final Remarks Check (Checking both SLA ID and Mapped TC Order Number) ──
         tc_mapped_num = tc_id_to_num.get(order_id, "")
@@ -422,9 +499,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     # == 6. Country-specific datasets & Pivot Tables ==========================
     country_reports = {}
     
-    # Pre-calculate clean Order Date for columns
-    date_col = _find_column(df_pending, ["ordered_date", "Order Date", "Date", "Created Date"])
-    if date_col:
+    # Pre-calculate clean SLA Date for columns
+    date_col = target_sla_col
+    if date_col and date_col in df_pending.columns:
         df_pending["Order Date"] = df_pending[date_col].apply(extract_date)
     else:
         df_pending["Order Date"] = "Unknown"
@@ -439,17 +516,17 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
                     row_dict = row.to_dict()
                     row_dict["Country"] = country
-                    row_dict["Channel"] = chan
+                    row_dict["Channel"] = f"{chan} {country}"
                     c_rows.append(row_dict)
                 elif country == "MY" and chan in ["Lazada", "Shopee", "Zalora", "TikTok"]:
                     row_dict = row.to_dict()
                     row_dict["Country"] = country
-                    row_dict["Channel"] = chan
+                    row_dict["Channel"] = f"{chan} {country}"
                     c_rows.append(row_dict)
                 elif country == "PH" and chan in ["Lazada", "Shopee", "Zalora"]:
                     row_dict = row.to_dict()
                     row_dict["Country"] = country
-                    row_dict["Channel"] = chan
+                    row_dict["Channel"] = f"{chan} {country}"
                     c_rows.append(row_dict)
                     
         country_df = pd.DataFrame(c_rows)
@@ -462,6 +539,17 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 aggfunc="count",
                 fill_value=0
             )
+            
+            # Format columns of Pivot Table as DD-MM-YYYY
+            new_cols = []
+            for col in pivot_df.columns:
+                try:
+                    dt = pd.to_datetime(col)
+                    new_cols.append(dt.strftime('%d-%m-%Y'))
+                except Exception:
+                    new_cols.append(col)
+            pivot_df.columns = new_cols
+            
             # Add Grand Total column
             pivot_df["Grand Total"] = pivot_df.sum(axis=1)
             # Add Grand Total row
@@ -504,11 +592,19 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         "total_sellers": len(seller_groups)
     }
 
+    ref_date_dmy = ""
+    try:
+        ref_dt = datetime.strptime(ref_date, "%Y-%m-%d")
+        ref_date_dmy = ref_dt.strftime("%d-%m-%Y")
+    except Exception:
+        ref_date_dmy = ref_date
+
     return {
         "enriched_pending_df": df_pending,
         "discrepancies_df": df_discrepancies,
         "summary": summary,
         "seller_groups": seller_groups,
         "pending_order_id_col": target_sla_col,
-        "country_reports": country_reports
+        "country_reports": country_reports,
+        "ref_date_dmy": ref_date_dmy
     }
