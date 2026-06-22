@@ -72,8 +72,8 @@ def autofit_columns(ws, min_width=10, padding=3):
         ws.column_dimensions[col_letter].width = max(max_len + padding, min_width)
 
 def format_data_sheet(ws, df):
-    """Applies basic styling, bold headers, thin borders, and auto-fit to data sheet."""
-    ws.views.sheetView[0].showGridLines = True
+    """Applies basic styling, bold headers, thin borders, and center alignment to all data cells."""
+    ws.sheet_view.showGridLines = True
     
     # Header Row formatting
     for col_idx in range(1, len(df.columns) + 1):
@@ -82,33 +82,22 @@ def format_data_sheet(ws, df):
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = thin_border
         
-    # Data Rows formatting
+    # Data Rows formatting (all showing center alignment as requested)
     for row_idx in range(2, len(df) + 2):
         for col_idx in range(1, len(df.columns) + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.font = FONT_NORMAL
             cell.border = thin_border
-            
-            # Align numeric cells to center or right
-            val = cell.value
-            if isinstance(val, (int, float)):
-                cell.alignment = Alignment(horizontal='right')
-            else:
-                cell.alignment = Alignment(horizontal='left')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
                 
     autofit_columns(ws)
 
-def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str):
+def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, ref_date_str):
     """
-    Creates an openpyxl Workbook with 'Summary' and 'Data' sheets matching specifications.
-    ref_date_str is in 'DD-MM-YYYY' format.
+    Adds country styled Summary and Data sheets to an existing workbook.
     """
-    wb = openpyxl.Workbook()
-    
-    # == 1. Summary Sheet ======================================================
-    ws_summary = wb.active
-    ws_summary.title = "Summary"
-    ws_summary.views.sheetView[0].showGridLines = True
+    ws_summary = wb.create_sheet(title=f"{country} Summary")
+    ws_summary.sheet_view.showGridLines = True
     
     # ── Title Block merged to match the pivot table width ──
     title_end_col = len(pivot_df.columns) if not pivot_df.empty else 6
@@ -147,7 +136,6 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
                     if is_grand_total_row:
                         cell.value = "Grand Total"
                         cell.font = FONT_BOLD
-                        cell.alignment = Alignment(horizontal='left', vertical='center')
                     else:
                         chan_val = str(val or '').strip()
                         if chan_val == last_channel:
@@ -156,14 +144,14 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
                             cell.value = chan_val
                             last_channel = chan_val
                             cell.font = FONT_BOLD
-                        cell.alignment = Alignment(horizontal='left', vertical='center')
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
                 # Check for OMS Status column (2nd column)
                 elif col_idx == 2:
                     if is_grand_total_row:
                         cell.value = ""
                     else:
                         cell.value = str(val or '').strip()
-                    cell.alignment = Alignment(horizontal='left', vertical='center')
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
                     cell.font = FONT_BOLD if is_grand_total_row else FONT_NORMAL
                 # Check for Date Columns & Grand Total value
                 else:
@@ -211,7 +199,7 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
         cell_lbl = ws_summary.cell(row=row_pos, column=start_col, value=display_name)
         cell_lbl.fill = fill
         cell_lbl.font = font
-        cell_lbl.alignment = Alignment(horizontal='left', vertical='center')
+        cell_lbl.alignment = Alignment(horizontal='center', vertical='center')
         cell_lbl.border = thin_border
         
         # Metric Value
@@ -227,7 +215,7 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
     autofit_columns(ws_summary)
     
     # == 2. Data Sheet =========================================================
-    ws_data = wb.create_sheet(title="Data")
+    ws_data = wb.create_sheet(title=f"{country} Data")
     
     # Write Header
     if not raw_df.empty:
@@ -241,5 +229,20 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
                 ws_data.cell(row=row_idx, column=col_idx, value=val)
                 
         format_data_sheet(ws_data, raw_df)
-        
+
+def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str):
+    """
+    Creates a country-specific workbook (Summary + Data).
+    """
+    wb = openpyxl.Workbook()
+    # Remove default sheet
+    default_sheet = wb.active
+    wb.remove(default_sheet)
+    
+    add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, ref_date_str)
+    
+    # Rename f"{country} Summary" -> "Summary" and f"{country} Data" -> "Data"
+    wb.worksheets[0].title = "Summary"
+    wb.worksheets[1].title = "Data"
+    
     return wb
