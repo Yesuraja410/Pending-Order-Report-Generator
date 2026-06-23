@@ -173,6 +173,17 @@ def load_file_safely(file):
     if file is None:
         return pd.DataFrame()
     
+    # If a string path is passed, open it and read as BytesIO
+    if isinstance(file, str):
+        import os
+        if not os.path.exists(file):
+            return pd.DataFrame()
+        with open(file, 'rb') as f:
+            file_bytes = f.read()
+        filename = os.path.basename(file)
+        file = io.BytesIO(file_bytes)
+        file.name = filename
+
     try:
         file.seek(0)
     except Exception:
@@ -227,33 +238,58 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
     """
     # == 1. Load DataFrames ====================================================
-    if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
-        pending_file = download_google_sheet(pending_file)
-    df_pending = load_file_safely(pending_file)
+    if pending_file:
+        if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
+            pending_file = download_google_sheet(pending_file)
+        df_pending = load_file_safely(pending_file)
+    else:
+        df_pending = pd.DataFrame()
+
     df_tc = load_file_safely(tc_file)
     df_oms = load_file_safely(oms_file)
     df_contacts = load_file_safely(contacts_file) if contacts_file is not None else pd.DataFrame()
 
-    if df_pending.empty:
-        raise ValueError("Pending Order Report (SLA Report) is empty or could not be loaded.")
     if df_tc.empty:
         raise ValueError("TC Report (All file) is empty or could not be loaded.")
     if df_oms.empty:
         raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
 
-    # Find store column in SLA Report first to ignore TikTok PH
-    pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
-    if pend_store_col and pend_store_col in df_pending.columns:
-        # Filter out TikTok PH orders
-        df_pending = df_pending[df_pending[pend_store_col].astype(str).str.strip().str.lower() != 'tiktok-ph'].copy()
+    has_pending = not df_pending.empty
 
-    if df_pending.empty:
-        raise ValueError("Pending Order Report (SLA Report) has no rows after filtering out TikTok PH.")
+    # Find store column in SLA Report first to ignore TikTok PH
+    pend_store_col = None
+    if has_pending:
+        pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+        if pend_store_col and pend_store_col in df_pending.columns:
+            # Filter out TikTok PH orders
+            df_pending = df_pending[df_pending[pend_store_col].astype(str).str.strip().str.lower() != 'tiktok-ph'].copy()
+
+        if df_pending.empty:
+            raise ValueError("Pending Order Report (SLA Report) has no rows after filtering out TikTok PH.")
+        
+        has_pending = not df_pending.empty
 
     # == 2. Standardize Columns ===============================================
-    # Pending Order columns
-    pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-    pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
+    pend_id_col = None
+    pend_sla_col = None
+    target_sla_col = "SLA"
+    target_store_col = "Store Name"
+
+    if has_pending:
+        # Pending Order columns
+        pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+        pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
+        if not pend_id_col:
+            raise KeyError(f"Could not find 'Order ID' column in Pending Order Report. Available: {list(df_pending.columns)}")
+        df_pending[pend_id_col] = df_pending[pend_id_col].apply(_clean_order_id)
+        
+        target_sla_col = pend_sla_col if pend_sla_col else "SLA"
+        if target_sla_col not in df_pending.columns:
+            df_pending[target_sla_col] = ""
+
+        target_store_col = pend_store_col if pend_store_col else "Store Name"
+        if target_store_col not in df_pending.columns:
+            df_pending[target_store_col] = "Default Store"
     
     # TC Report columns (All file)
     tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
@@ -273,15 +309,12 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     oms_pay_method_col = _find_column(df_oms, ["Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
 
     # Raise error if critical columns are missing
-    if not pend_id_col:
-        raise KeyError(f"Could not find 'Order ID' column in Pending Order Report. Available: {list(df_pending.columns)}")
     if not tc_id_col:
         raise KeyError(f"Could not find 'Order ID' column in TC Report (All file). Available: {list(df_tc.columns)}")
     if not oms_id_col:
         raise KeyError(f"Could not find 'Order ID' column in OMS Report (Sales Order file). Available: {list(df_oms.columns)}")
 
     # Clean Order IDs to ensure matches (retaining large string values correctly)
-    df_pending[pend_id_col] = df_pending[pend_id_col].apply(_clean_order_id)
     df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
     df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
     if tc_num_col:
@@ -317,126 +350,118 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     oms_pay_status_map = df_oms.set_index(oms_id_col)[oms_pay_status_col].dropna().to_dict() if oms_pay_status_col else {}
     oms_pay_method_map = df_oms.set_index(oms_id_col)[oms_pay_method_col].dropna().to_dict() if oms_pay_method_col else {}
 
-    # Ensure SLA column exists in pending
-    target_sla_col = pend_sla_col if pend_sla_col else "SLA"
-    if target_sla_col not in df_pending.columns:
-        df_pending[target_sla_col] = ""
-
-    # Ensure Store Name exists in pending
-    target_store_col = pend_store_col if pend_store_col else "Store Name"
-    if target_store_col not in df_pending.columns:
-        df_pending[target_store_col] = "Default Store"
-
-    # Add output columns to Pending Order Report
-    df_pending["Correct Order Number"] = df_pending[pend_id_col]
-    df_pending["SLA Source"] = "Pending Report"
-    df_pending["OMS Order Status"] = ""
-    df_pending["Final Remarks"] = ""
-
-    # Clean Store Name / nickname column to remove PUMA_ prefix case-insensitively
-    if target_store_col in df_pending.columns:
-        df_pending[target_store_col] = df_pending[target_store_col].apply(
-            lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
-        )
-
-    # Determine reference date from "Today" rows or data
-    ref_date = None
-    if "sla_status" in df_pending.columns:
-        today_rows = df_pending[df_pending["sla_status"].astype(str).str.strip().str.lower() == "today"]
-        if not today_rows.empty:
-            for val in today_rows[target_sla_col]:
-                if not _is_blank(val):
-                    p_dt = extract_date(val)
-                    if len(p_dt) == 10:
-                        ref_date = p_dt
-                        break
-    if not ref_date:
-        if target_sla_col in df_pending.columns:
-            for val in df_pending[target_sla_col]:
-                if not _is_blank(val):
-                    p_dt = extract_date(val)
-                    if len(p_dt) == 10:
-                        ref_date = p_dt
-                        break
-    if not ref_date:
-        ref_date = datetime.today().strftime('%Y-%m-%d')
-
-    # Ensure sla_status column exists in df_pending
-    if "sla_status" not in df_pending.columns:
-        df_pending["sla_status"] = ""
-
     enriched_sla_count = 0
     blank_sla_not_found = 0
     pushed_count = 0
     not_pushed_count = 0
     unpaid_count = 0
+    ref_date = datetime.today().strftime('%Y-%m-%d')
 
-    for idx, row in df_pending.iterrows():
-        order_id = row[pend_id_col]
-        sla_val = row[target_sla_col]
-        
-        # ── SLA Check ──
-        if _is_blank(sla_val): # Blank SLA (recognizing "NaT", "nan" loaded via dtype=str)
-            tc_sla_val = _clean_str(tc_sla_map.get(order_id, ""))
-            if not _is_blank(tc_sla_val):
-                df_pending.at[idx, target_sla_col] = tc_sla_val
-                df_pending.at[idx, "SLA Source"] = "Enriched from TC"
-                enriched_sla_count += 1
+    if has_pending:
+        # Add output columns to Pending Order Report
+        df_pending["Correct Order Number"] = df_pending[pend_id_col]
+        df_pending["SLA Source"] = "Pending Report"
+        df_pending["OMS Order Status"] = ""
+        df_pending["Final Remarks"] = ""
+
+        # Clean Store Name / nickname column to remove PUMA_ prefix case-insensitively
+        if target_store_col in df_pending.columns:
+            df_pending[target_store_col] = df_pending[target_store_col].apply(
+                lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
+            )
+
+        # Determine reference date from "Today" rows or data
+        temp_ref_date = None
+        if "sla_status" in df_pending.columns:
+            today_rows = df_pending[df_pending["sla_status"].astype(str).str.strip().str.lower() == "today"]
+            if not today_rows.empty:
+                for val in today_rows[target_sla_col]:
+                    if not _is_blank(val):
+                        p_dt = extract_date(val)
+                        if len(p_dt) == 10:
+                            temp_ref_date = p_dt
+                            break
+        if not temp_ref_date:
+            if target_sla_col in df_pending.columns:
+                for val in df_pending[target_sla_col]:
+                    if not _is_blank(val):
+                        p_dt = extract_date(val)
+                        if len(p_dt) == 10:
+                            temp_ref_date = p_dt
+                            break
+        if temp_ref_date:
+            ref_date = temp_ref_date
+
+        # Ensure sla_status column exists in df_pending
+        if "sla_status" not in df_pending.columns:
+            df_pending["sla_status"] = ""
+
+        for idx, row in df_pending.iterrows():
+            order_id = row[pend_id_col]
+            sla_val = row[target_sla_col]
+            
+            # ── SLA Check ──
+            if _is_blank(sla_val): # Blank SLA (recognizing "NaT", "nan" loaded via dtype=str)
+                tc_sla_val = _clean_str(tc_sla_map.get(order_id, ""))
+                if not _is_blank(tc_sla_val):
+                    df_pending.at[idx, target_sla_col] = tc_sla_val
+                    df_pending.at[idx, "SLA Source"] = "Enriched from TC"
+                    enriched_sla_count += 1
+                else:
+                    df_pending.at[idx, "SLA Source"] = "Missing (Not in TC)"
+                    blank_sla_not_found += 1
             else:
-                df_pending.at[idx, "SLA Source"] = "Missing (Not in TC)"
-                blank_sla_not_found += 1
-        else:
-            df_pending.at[idx, "SLA Source"] = "Pending Report"
+                df_pending.at[idx, "SLA Source"] = "Pending Report"
 
-        # Update/Compute sla_status for blanks/enriched or if not present
-        sla_status_val = row.get("sla_status", "")
-        if _is_blank(sla_status_val):
-            curr_sla = df_pending.at[idx, target_sla_col]
-            calculated_status = compute_sla_status(curr_sla, ref_date)
-            if calculated_status:
-                df_pending.at[idx, "sla_status"] = calculated_status
+            # Update/Compute sla_status for blanks/enriched or if not present
+            sla_status_val = row.get("sla_status", "")
+            if _is_blank(sla_status_val):
+                curr_sla = df_pending.at[idx, target_sla_col]
+                calculated_status = compute_sla_status(curr_sla, ref_date)
+                if calculated_status:
+                    df_pending.at[idx, "sla_status"] = calculated_status
 
-        # ── OMS Status & Final Remarks Check (Checking both SLA ID and Mapped TC Order Number) ──
-        tc_mapped_num = tc_id_to_num.get(order_id, "")
-        
-        is_in_oms = False
-        oms_stat = ""
-        
-        if order_id in oms_status_map:
-            is_in_oms = True
-            oms_stat = oms_status_map[order_id]
-        elif tc_mapped_num and tc_mapped_num in oms_status_map:
-            is_in_oms = True
-            oms_stat = oms_status_map[tc_mapped_num]
+            # ── OMS Status & Final Remarks Check (Checking both SLA ID and Mapped TC Order Number) ──
+            tc_mapped_num = tc_id_to_num.get(order_id, "")
             
-        if is_in_oms:
-            df_pending.at[idx, "OMS Order Status"] = oms_stat
-            df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
-            pushed_count += 1
-        else:
-            df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+            is_in_oms = False
+            oms_stat = ""
             
-            # Retrieve payment status & method from TC (All file) as fallback
-            pay_status = _clean_str(tc_payment_status.get(order_id, ""))
-            pay_method = _clean_str(tc_payment_method.get(order_id, ""))
-            
-            is_cod = any(term in pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
-            is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting"))
-            is_completed = (pay_status.lower() in ("completed", "paid", "success", "complete", "fully_paid"))
-            
-            if is_pending and not is_cod:
-                df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
-                unpaid_count += 1
-            elif (is_pending and is_cod) or is_completed or not pay_status:
-                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-                not_pushed_count += 1
+            if order_id in oms_status_map:
+                is_in_oms = True
+                oms_stat = oms_status_map[order_id]
+            elif tc_mapped_num and tc_mapped_num in oms_status_map:
+                is_in_oms = True
+                oms_stat = oms_status_map[tc_mapped_num]
+                
+            if is_in_oms:
+                df_pending.at[idx, "OMS Order Status"] = oms_stat
+                df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
+                pushed_count += 1
             else:
-                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-                not_pushed_count += 1
+                df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                
+                # Retrieve payment status & method from TC (All file) as fallback
+                pay_status = _clean_str(tc_payment_status.get(order_id, ""))
+                pay_method = _clean_str(tc_payment_method.get(order_id, ""))
+                
+                is_cod = any(term in pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
+                is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting"))
+                is_completed = (pay_status.lower() in ("completed", "paid", "success", "complete", "fully_paid"))
+                
+                if is_pending and not is_cod:
+                    df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
+                    unpaid_count += 1
+                elif (is_pending and is_cod) or is_completed or not pay_status:
+                    df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                    not_pushed_count += 1
+                else:
+                    df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                    not_pushed_count += 1
 
-    # Format SLA Date column to show only Date (no Time) in output report
-    if target_sla_col in df_pending.columns:
-        df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
+        # Format SLA Date column to show only Date (no Time) in output report
+        if target_sla_col in df_pending.columns:
+            df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
 
     # == 4. Status Discrepancy Validations ====================================
     # Identify item-level columns
@@ -598,131 +623,135 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     ])
 
     # == 5. Seller Contact Map & Grouping =====================================
-    email_map = {}
-    if not df_contacts.empty:
-        c_store = _find_column(df_contacts, ["Store Name", "Store", "Seller", "Shop Name", "Shop"])
-        c_email = _find_column(df_contacts, ["Seller Email", "Email", "SellerEmail", "Email Address"])
-        if c_store and c_email:
-            for _, row in df_contacts.iterrows():
-                store_key = _clean_str(row[c_store]).lower()
-                email_val = _clean_str(row[c_email])
-                if store_key and email_val:
-                    email_map[store_key] = email_val
-
-    # Group enriched pending orders by Seller
     seller_groups = {}
-    stores = df_pending[target_store_col].unique()
+    if has_pending:
+        email_map = {}
+        if not df_contacts.empty:
+            c_store = _find_column(df_contacts, ["Store Name", "Store", "Seller", "Shop Name", "Shop"])
+            c_email = _find_column(df_contacts, ["Seller Email", "Email", "SellerEmail", "Email Address"])
+            if c_store and c_email:
+                for _, row in df_contacts.iterrows():
+                    store_key = _clean_str(row[c_store]).lower()
+                    email_val = _clean_str(row[c_email])
+                    if store_key and email_val:
+                        email_map[store_key] = email_val
 
-    for store in stores:
-        store_clean = _clean_str(store)
-        store_key = store_clean.lower()
-        
-        store_df = df_pending[df_pending[target_store_col] == store].copy()
-        
-        mapped_email = email_map.get(store_key, "")
-        store_df["Seller Email"] = mapped_email
-        
-        seller_groups[store_clean] = {
-            "df": store_df,
-            "email": mapped_email
-        }
+        # Group enriched pending orders by Seller
+        stores = df_pending[target_store_col].unique()
+
+        for store in stores:
+            store_clean = _clean_str(store)
+            store_key = store_clean.lower()
+            
+            store_df = df_pending[df_pending[target_store_col] == store].copy()
+            
+            mapped_email = email_map.get(store_key, "")
+            store_df["Seller Email"] = mapped_email
+            
+            seller_groups[store_clean] = {
+                "df": store_df,
+                "email": mapped_email
+            }
 
     # == 6. Country-specific datasets & Pivot Tables ==========================
     country_reports = {}
     
-    # Pre-calculate clean SLA Date for columns
-    date_col = target_sla_col
-    if date_col and date_col in df_pending.columns:
-        df_pending["Order Date"] = df_pending[date_col].apply(extract_date)
-    else:
-        df_pending["Order Date"] = "Unknown"
-    
+    # Initialize empty reports for all countries
     for country in ["SG", "MY", "PH"]:
-        c_rows = []
-        for idx, row in df_pending.iterrows():
-            store_val = _clean_str(row[target_store_col])
-            c_code, chan = parse_country_and_channel(store_val)
-            if c_code == country:
-                final_rem = _clean_str(row.get("Final Remarks", ""))
-                oms_stat = _clean_str(row.get("OMS Order Status", ""))
-                
-                # Ignore Unpaid orders and OMS shipped orders in country wise output reports
-                if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
-                    continue
-                    
-                # Apply channel filter requirements:
-                if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
-                    row_dict = row.to_dict()
-                    row_dict["Country"] = country
-                    row_dict["Channel"] = f"{chan} {country}"
-                    c_rows.append(row_dict)
-                elif country == "MY" and chan in ["Lazada", "Shopee", "Zalora", "TikTok"]:
-                    row_dict = row.to_dict()
-                    row_dict["Country"] = country
-                    row_dict["Channel"] = f"{chan} {country}"
-                    c_rows.append(row_dict)
-                elif country == "PH" and chan in ["Lazada", "Shopee", "Zalora"]:
-                    row_dict = row.to_dict()
-                    row_dict["Country"] = country
-                    row_dict["Channel"] = f"{chan} {country}"
-                    c_rows.append(row_dict)
-                    
-        country_df = pd.DataFrame(c_rows)
-        if not country_df.empty:
-            # Pivot table: Channel & OMS status in Rows, Order date in Columns, Order number (count) in Values
-            pivot_df = country_df.pivot_table(
-                index=["Channel", "OMS Order Status"],
-                columns="Order Date",
-                values="Correct Order Number",
-                aggfunc="count",
-                fill_value=0
-            )
-            
-            # Format columns of Pivot Table as DD-MM-YYYY
-            new_cols = []
-            for col in pivot_df.columns:
-                try:
-                    dt = pd.to_datetime(col)
-                    new_cols.append(dt.strftime('%d-%m-%Y'))
-                except Exception:
-                    new_cols.append(col)
-            pivot_df.columns = new_cols
-            
-            # Add Grand Total column
-            pivot_df["Grand Total"] = pivot_df.sum(axis=1)
-            # Add Grand Total row
-            pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
-            pivot_df = pivot_df.reset_index()
-            
-            # Highlight Summary metrics
-            summary_metrics = [
-                {"Metric": "Overdue (SLA breached)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "breached").sum()) if "sla_status" in country_df else 0},
-                {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum()) if "sla_status" in country_df else 0},
-                {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
-                {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum()) if "sla_status" in country_df else 0},
-                {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())}
-            ]
-            summary_df = pd.DataFrame(summary_metrics)
-            
-            # Drop unwanted columns from raw sheet data
-            cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel"]
-            country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
-            
-            country_reports[country] = {
-                "raw_df": country_df_export,
-                "pivot_df": pivot_df,
-                "summary_df": summary_df
-            }
+        country_reports[country] = {
+            "raw_df": pd.DataFrame(),
+            "pivot_df": pd.DataFrame(),
+            "summary_df": pd.DataFrame()
+        }
+
+    if has_pending:
+        # Pre-calculate clean SLA Date for columns
+        date_col = target_sla_col
+        if date_col and date_col in df_pending.columns:
+            df_pending["Order Date"] = df_pending[date_col].apply(extract_date)
         else:
-            country_reports[country] = {
-                "raw_df": pd.DataFrame(),
-                "pivot_df": pd.DataFrame(),
-                "summary_df": pd.DataFrame()
-            }
+            df_pending["Order Date"] = "Unknown"
+        
+        for country in ["SG", "MY", "PH"]:
+            c_rows = []
+            for idx, row in df_pending.iterrows():
+                store_val = _clean_str(row[target_store_col])
+                c_code, chan = parse_country_and_channel(store_val)
+                if c_code == country:
+                    final_rem = _clean_str(row.get("Final Remarks", ""))
+                    oms_stat = _clean_str(row.get("OMS Order Status", ""))
+                    
+                    # Ignore Unpaid orders and OMS shipped orders in country wise output reports
+                    if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
+                        continue
+                        
+                    # Apply channel filter requirements:
+                    if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
+                        row_dict = row.to_dict()
+                        row_dict["Country"] = country
+                        row_dict["Channel"] = f"{chan} {country}"
+                        c_rows.append(row_dict)
+                    elif country == "MY" and chan in ["Lazada", "Shopee", "Zalora", "TikTok"]:
+                        row_dict = row.to_dict()
+                        row_dict["Country"] = country
+                        row_dict["Channel"] = f"{chan} {country}"
+                        c_rows.append(row_dict)
+                    elif country == "PH" and chan in ["Lazada", "Shopee", "Zalora"]:
+                        row_dict = row.to_dict()
+                        row_dict["Country"] = country
+                        row_dict["Channel"] = f"{chan} {country}"
+                        c_rows.append(row_dict)
+                        
+            country_df = pd.DataFrame(c_rows)
+            if not country_df.empty:
+                # Pivot table: Channel & OMS status in Rows, Order date in Columns, Order number (count) in Values
+                pivot_df = country_df.pivot_table(
+                    index=["Channel", "OMS Order Status"],
+                    columns="Order Date",
+                    values="Correct Order Number",
+                    aggfunc="count",
+                    fill_value=0
+                )
+                
+                # Format columns of Pivot Table as DD-MM-YYYY
+                new_cols = []
+                for col in pivot_df.columns:
+                    try:
+                        dt = pd.to_datetime(col)
+                        new_cols.append(dt.strftime('%d-%m-%Y'))
+                    except Exception:
+                        new_cols.append(col)
+                pivot_df.columns = new_cols
+                
+                # Add Grand Total column
+                pivot_df["Grand Total"] = pivot_df.sum(axis=1)
+                # Add Grand Total row
+                pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
+                pivot_df = pivot_df.reset_index()
+                
+                # Highlight Summary metrics
+                summary_metrics = [
+                    {"Metric": "Overdue (SLA breached)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "breached").sum()) if "sla_status" in country_df else 0},
+                    {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum()) if "sla_status" in country_df else 0},
+                    {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
+                    {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum()) if "sla_status" in country_df else 0},
+                    {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())}
+                ]
+                summary_df = pd.DataFrame(summary_metrics)
+                
+                # Drop unwanted columns from raw sheet data
+                cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel"]
+                country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
+                
+                country_reports[country] = {
+                    "raw_df": country_df_export,
+                    "pivot_df": pivot_df,
+                    "summary_df": summary_df
+                }
 
     # Summary metrics
     summary = {
-        "total_pending_orders": len(df_pending),
+        "total_pending_orders": len(df_pending) if has_pending else 0,
         "enriched_sla_count": enriched_sla_count,
         "blank_sla_not_found": blank_sla_not_found,
         "total_discrepancies": len(df_discrepancies),
@@ -746,7 +775,8 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         "discrepancies_df": df_discrepancies,
         "summary": summary,
         "seller_groups": seller_groups,
-        "pending_order_id_col": target_sla_col,
+        "pending_order_id_col": target_sla_col if has_pending else "",
         "country_reports": country_reports,
         "ref_date_dmy": ref_date_dmy
     }
+
