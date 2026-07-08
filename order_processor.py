@@ -172,6 +172,8 @@ def load_file_safely(file):
     """Load uploaded file object (CSV or Excel) into a DataFrame. Scans sheets if Excel."""
     if file is None:
         return pd.DataFrame()
+    if isinstance(file, pd.DataFrame):
+        return file
     
     # If a string path is passed, open it and read as BytesIO
     if isinstance(file, str):
@@ -238,13 +240,6 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
     """
     # == 1. Load DataFrames ====================================================
-    if pending_file:
-        if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
-            pending_file = download_google_sheet(pending_file)
-        df_pending = load_file_safely(pending_file)
-    else:
-        df_pending = pd.DataFrame()
-
     df_tc = load_file_safely(tc_file)
     df_oms = load_file_safely(oms_file)
     df_contacts = load_file_safely(contacts_file) if contacts_file is not None else pd.DataFrame()
@@ -253,6 +248,50 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         raise ValueError("TC Report (All file) is empty or could not be loaded.")
     if df_oms.empty:
         raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
+
+    if pending_file:
+        if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
+            pending_file = download_google_sheet(pending_file)
+        df_pending = load_file_safely(pending_file)
+    else:
+        df_pending = pd.DataFrame()
+
+    # If the g sheet / pending file is not uploaded, generate df_pending from TC Report
+    # pending orders from TC with status of NEW, READY TO SHIP & ACCEPTED/PICKED
+    if df_pending.empty:
+        tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+        tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
+        tc_status_col = _find_column(df_tc, ["order_status", "TC Status", "Order Status", "Status", "TC_Status"])
+        tc_sla_col = _find_column(df_tc, ["time_to_ship_dead_line", "order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
+        tc_store_col = _find_column(df_tc, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+        
+        status_col = tc_item_status_col if tc_item_status_col else tc_status_col
+        pending_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
+        
+        tc_pending_rows = []
+        if status_col and tc_id_col:
+            for _, row in df_tc.iterrows():
+                stat = _normalize_status_val(row.get(status_col))
+                is_pending = False
+                for p_stat in pending_statuses:
+                    if p_stat in stat:
+                        is_pending = True
+                        break
+                if is_pending:
+                    tc_pending_rows.append(row)
+                    
+        if tc_pending_rows:
+            df_pending = pd.DataFrame(tc_pending_rows)
+            # Map required columns
+            df_pending["Order ID"] = df_pending[tc_id_col].apply(_clean_order_id)
+            if tc_sla_col and tc_sla_col in df_pending.columns:
+                df_pending["SLA"] = df_pending[tc_sla_col]
+            else:
+                df_pending["SLA"] = ""
+            if tc_store_col and tc_store_col in df_pending.columns:
+                df_pending["Store Name"] = df_pending[tc_store_col]
+            else:
+                df_pending["Store Name"] = "Default Store"
 
     has_pending = not df_pending.empty
 
@@ -515,9 +554,11 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 "Row": row.to_dict()
             }
 
-    # Compare status logic
     all_keys = set(tc_lookup.keys()) & set(oms_lookup.keys()) # intersect line item keys
     discrepancies = []
+
+    # Get TC store column for nickname lookup
+    tc_store_col = _find_column(df_tc, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
 
     for key in all_keys:
         tc_item_status = tc_lookup[key]["Item Status"]
@@ -529,9 +570,14 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         oid = tc_lookup[key]["Order ID"]
         sku = tc_lookup[key]["SKU"]
         
+        nickname_val = ""
+        if tc_store_col and tc_store_col in tc_lookup[key]["Row"]:
+            nickname_val = tc_lookup[key]["Row"][tc_store_col]
+            
         # Normalize for checks
         tc_item_norm = _normalize_status_val(tc_item_status)
         oms_line_norm = _normalize_status_val(oms_line_status)
+
 
         # 1. Ignore exception: OMS is Shipped and TC is RETURN REQUESTED, CANCELLED, SHIPPED (or combination CANCELLED,SHIPPED)
         # We split by comma to handle comma-separated combinations like CANCELLED,SHIPPED
@@ -551,6 +597,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         if is_tc_cancelled != is_oms_cancelled and not is_tc_cancelled_and_oms_returned:
             discrepancies.append({
                 "Order ID": oid,
+                "Nickname": nickname_val,
                 "SKU": sku,
                 "Validation Result": "Cancelled Sync Mismatch",
                 "TC Order Status": tc_order_status,
@@ -564,6 +611,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         if oms_line_norm == "packed" and tc_item_norm == "new":
             discrepancies.append({
                 "Order ID": oid,
+                "Nickname": nickname_val,
                 "SKU": sku,
                 "Validation Result": "OMS Packed but TC New",
                 "TC Order Status": tc_order_status,
@@ -579,6 +627,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             # if we reached here, TC is not in ignored list and OMS is Shipped, so it's a mismatch!
             discrepancies.append({
                 "Order ID": oid,
+                "Nickname": nickname_val,
                 "SKU": sku,
                 "Validation Result": "OMS Shipped but TC not Shipped",
                 "TC Order Status": tc_order_status,
@@ -594,6 +643,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             if oms_line_norm in ("new", "processing", "picked", "packed", "shipped"):
                 discrepancies.append({
                     "Order ID": oid,
+                    "Nickname": nickname_val,
                     "SKU": sku,
                     "Validation Result": "TC Delivered but OMS not Delivered",
                     "TC Order Status": tc_order_status,
@@ -609,6 +659,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             if not ("returned" in oms_line_norm or "return" in oms_line_norm):
                 discrepancies.append({
                     "Order ID": oid,
+                    "Nickname": nickname_val,
                     "SKU": sku,
                     "Validation Result": "TC Returned but OMS not Returned",
                     "TC Order Status": tc_order_status,
@@ -618,8 +669,62 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                     "Details": f"Discrepancy for item {sku}: TC status is Returned, but OMS status is '{oms_line_status}'."
                 })
 
-    df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
-        "Order ID", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+    # == Shopee Partial Cancellation Mismatch Filter ==
+    filtered_discrepancies = []
+    from collections import defaultdict
+    order_discs = defaultdict(list)
+    for disc in discrepancies:
+        order_discs[disc["Order ID"]].append(disc)
+
+    for oid, discs in order_discs.items():
+        has_cancel_mismatch = any(d["Validation Result"] == "Cancelled Sync Mismatch" for d in discs)
+        if has_cancel_mismatch:
+            # Check if this is a Shopee order
+            sample_key = next((k for k in tc_lookup if tc_lookup[k]["Order ID"] == oid), None)
+            if not sample_key:
+                sample_key = next((k for k in oms_lookup if oms_lookup[k]["Order ID"] == oid), None)
+                
+            is_shopee = False
+            if sample_key:
+                s_val = ""
+                if sample_key in tc_lookup and tc_store_col and tc_store_col in tc_lookup[sample_key]["Row"]:
+                    s_val = tc_lookup[sample_key]["Row"][tc_store_col]
+                elif sample_key in oms_lookup and "nickname" in oms_lookup[sample_key]["Row"]:
+                    s_val = oms_lookup[sample_key]["Row"].get("nickname", "")
+                elif sample_key in oms_lookup and "store" in oms_lookup[sample_key]["Row"]:
+                    s_val = oms_lookup[sample_key]["Row"].get("store", "")
+                
+                _, chan = parse_country_and_channel(s_val)
+                if chan == "Shopee":
+                    is_shopee = True
+                    
+            if is_shopee:
+                # Get all items in TC and OMS for this Order ID to see if it's a partial cancellation
+                tc_items = [tc_lookup[k] for k in tc_lookup if tc_lookup[k]["Order ID"] == oid]
+                oms_items = [oms_lookup[k] for k in oms_lookup if oms_lookup[k]["Order ID"] == oid]
+                
+                tc_cancelled_count = sum(1 for item in tc_items if "cancel" in _normalize_status_val(item["Item Status"]))
+                oms_cancelled_count = sum(1 for item in oms_items if "cancel" in _normalize_status_val(item["Line Status"]))
+                
+                total_tc_items = len(tc_items)
+                total_oms_items = len(oms_items)
+                
+                # Check if cancellation is partial
+                is_partial_tc = (0 < tc_cancelled_count < total_tc_items)
+                is_partial_oms = (0 < oms_cancelled_count < total_oms_items)
+                
+                # If either side is partially cancelled, we ignore the Cancelled Sync Mismatch
+                if is_partial_tc or is_partial_oms:
+                    # Filter out Cancelled Sync Mismatch for this order
+                    for d in discs:
+                        if d["Validation Result"] != "Cancelled Sync Mismatch":
+                            filtered_discrepancies.append(d)
+                    continue
+
+        filtered_discrepancies.extend(discs)
+
+    df_discrepancies = pd.DataFrame(filtered_discrepancies) if filtered_discrepancies else pd.DataFrame(columns=[
+        "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
 
     # == 5. Seller Contact Map & Grouping =====================================
@@ -777,6 +882,8 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
         "seller_groups": seller_groups,
         "pending_order_id_col": target_sla_col if has_pending else "",
         "country_reports": country_reports,
-        "ref_date_dmy": ref_date_dmy
+        "ref_date_dmy": ref_date_dmy,
+        "tc_lookup": tc_lookup,
+        "oms_lookup": oms_lookup
     }
 
