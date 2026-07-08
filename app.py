@@ -29,12 +29,8 @@ with st.sidebar:
     st.markdown("## Configuration")
     st.markdown("Upload the daily reports below:")
     
-    pending_source = st.radio("1. Pending Order Report Source", ["Upload File", "Google Sheet Link"], index=0)
-    if pending_source == "Upload File":
-        order_pending = st.file_uploader("Upload Pending Order Report (SLA Report)", type=["xlsx","xls","csv"], key="order_pending")
-    else:
-        gsheet_url = st.text_input("Enter Google Sheet Link", placeholder="https://docs.google.com/spreadsheets/d/...")
-        order_pending = gsheet_url if gsheet_url.strip() else None
+    gsheet_url = st.text_input("1. Pending Order Report (Google Sheet Link)", placeholder="https://docs.google.com/spreadsheets/d/...")
+    order_pending = gsheet_url if gsheet_url.strip() else None
         
     order_tc = st.file_uploader("2. TC Report (All file)", type=["xlsx","xls","csv"], key="order_tc")
     order_oms = st.file_uploader("3. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
@@ -50,9 +46,9 @@ if not (order_tc and order_oms):
 else:
     # Display active mode banner
     if order_pending:
-        st.success("🎯 **Full Validation Mode**: Pending Order Report, TC Report, and OMS Report are ready for processing.")
+        st.success("🎯 **Full Validation Mode (GSheet SLA)**: Pending Order Report, TC Report, and OMS Report are ready for processing.")
     else:
-        st.info("ℹ️ **Status Reconciliation Mode**: TC Report and OMS Report are ready for validation (Pending Order SLA enrichment will be bypassed).")
+        st.success("🎯 **Validation Mode (TC Pending)**: Pending orders will be extracted from TC Report (status NEW, READY TO SHIP, ACCEPTED/PICKED) and reconciled against OMS Report.")
 
     # Trigger validation either by clicking sidebar button or main screen button
     if run_btn or st.button("Run Validation & Analysis", type="primary", use_container_width=True):
