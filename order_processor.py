@@ -120,17 +120,29 @@ def parse_country_and_channel(nickname):
         else:
             country = "UNKNOWN"
             
-    # Extract Channel
-    nick_lower = nick.lower()
-    if "shopee" in nick_lower:
-        channel = "Shopee"
-    elif "lazada" in nick_lower:
-        channel = "Lazada"
-    elif "zalora" in nick_lower:
-        channel = "Zalora"
-    elif "tiktok" in nick_lower:
-        channel = "TikTok"
-    else:
+    # Extract Channel dynamically
+    # Clean PUMA_ or PUMA- prefix
+    clean_nick = re.sub(r'^PUMA[_-]', '', nick, flags=re.IGNORECASE)
+    clean_nick = re.sub(r'^PUMA', '', clean_nick, flags=re.IGNORECASE)
+    
+    # Split by delimiters like - or _ or spaces
+    parts = re.split(r'[_-]', clean_nick)
+    first_part = parts[0].strip().title() if parts else "Other"
+    
+    # Standard mapping for common names to look nice
+    mapping = {
+        "Shopee": "Shopee",
+        "Lazada": "Lazada",
+        "Zalora": "Zalora",
+        "Tiktok": "TikTok",
+        "Salesforce": "Salesforce",
+        "Shopify": "Shopify",
+        "Decathlon": "Decathlon",
+        "Amazon": "Amazon"
+    }
+    
+    channel = mapping.get(first_part, first_part)
+    if not channel or channel.upper() in ("SG", "MY", "PH", "UNKNOWN"):
         channel = "Other"
         
     return country, channel
@@ -382,12 +394,15 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     if df_oms.empty:
         raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
 
-    if pending_file == "mcp":
+    if isinstance(pending_file, str) and pending_file == "mcp":
         df_pending = fetch_pending_from_mcp()
-    elif pending_file:
-        if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
-            pending_file = download_google_sheet(pending_file)
-        df_pending = load_file_safely(pending_file)
+    elif pending_file is not None:
+        if isinstance(pending_file, pd.DataFrame):
+            df_pending = pending_file
+        else:
+            if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
+                pending_file = download_google_sheet(pending_file)
+            df_pending = load_file_safely(pending_file)
     else:
         df_pending = pd.DataFrame()
 
@@ -530,6 +545,15 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     not_pushed_count = 0
     unpaid_count = 0
     ref_date = datetime.today().strftime('%Y-%m-%d')
+    missing_tc_discrepancies = []
+
+    # Build set of all unique order IDs/numbers in TC Report for quick cross-checking
+    tc_order_ids_set = set()
+    if tc_id_col and tc_id_col in df_tc.columns:
+        tc_order_ids_set.update(df_tc[tc_id_col].dropna().astype(str).str.strip().tolist())
+    # Add mapped Zalora package numbers
+    tc_order_ids_set.update(tc_id_to_num.keys())
+    tc_order_ids_set.update(tc_num_to_id.keys())
 
     if has_pending:
         # Add output columns to Pending Order Report
@@ -574,6 +598,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             order_id = row[pend_id_col]
             sla_val = row[target_sla_col]
             
+            # Clean string formats for checking
+            order_id_str = str(order_id).strip()
+            
             # ── SLA Check ──
             if _is_blank(sla_val): # Blank SLA (recognizing "NaT", "nan" loaded via dtype=str)
                 tc_sla_val = _clean_str(tc_sla_map.get(order_id, ""))
@@ -597,6 +624,7 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
 
             # ── OMS Status & Final Remarks Check (Checking both SLA ID and Mapped TC Order Number) ──
             tc_mapped_num = tc_id_to_num.get(order_id, "")
+            tc_mapped_num_str = str(tc_mapped_num).strip() if tc_mapped_num else ""
             
             is_in_oms = False
             oms_stat = ""
@@ -608,30 +636,52 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                 is_in_oms = True
                 oms_stat = oms_status_map[tc_mapped_num]
                 
-            if is_in_oms:
-                df_pending.at[idx, "OMS Order Status"] = oms_stat
-                df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
-                pushed_count += 1
+            # Perform TC cross-check
+            is_in_tc = (order_id_str in tc_order_ids_set) or (tc_mapped_num_str and tc_mapped_num_str in tc_order_ids_set)
+            
+            if not is_in_tc:
+                # Flag missing in TC
+                df_pending.at[idx, "Final Remarks"] = "Order missing in TC"
+                df_pending.at[idx, "OMS Order Status"] = oms_stat if is_in_oms else "Not in OMS"
+                
+                # Append to discrepancy list
+                store_val = _clean_str(row.get(target_store_col, ""))
+                missing_tc_discrepancies.append({
+                    "Order ID": order_id_str,
+                    "Nickname": store_val,
+                    "SKU": "",
+                    "Validation Result": "Order missing in TC",
+                    "TC Order Status": "Missing",
+                    "TC Item Status": "Missing",
+                    "OMS Order Status": oms_stat if is_in_oms else "Not in OMS",
+                    "OMS Line Status": oms_stat if is_in_oms else "Not in OMS",
+                    "Details": "Order is present in Pending SLA report but completely missing from TC Report."
+                })
             else:
-                df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
-                
-                # Retrieve payment status & method from TC (All file) as fallback
-                pay_status = _clean_str(tc_payment_status.get(order_id, ""))
-                pay_method = _clean_str(tc_payment_method.get(order_id, ""))
-                
-                is_cod = any(term in pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
-                is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting"))
-                is_completed = (pay_status.lower() in ("completed", "paid", "success", "complete", "fully_paid"))
-                
-                if is_pending and not is_cod:
-                    df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
-                    unpaid_count += 1
-                elif (is_pending and is_cod) or is_completed or not pay_status:
-                    df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-                    not_pushed_count += 1
+                if is_in_oms:
+                    df_pending.at[idx, "OMS Order Status"] = oms_stat
+                    df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
+                    pushed_count += 1
                 else:
-                    df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-                    not_pushed_count += 1
+                    df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                    
+                    # Retrieve payment status & method from TC (All file) as fallback
+                    pay_status = _clean_str(tc_payment_status.get(order_id, ""))
+                    pay_method = _clean_str(tc_payment_method.get(order_id, ""))
+                    
+                    is_cod = any(term in pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
+                    is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting"))
+                    is_completed = (pay_status.lower() in ("completed", "paid", "success", "complete", "fully_paid"))
+                    
+                    if is_pending and not is_cod:
+                        df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
+                        unpaid_count += 1
+                    elif (is_pending and is_cod) or is_completed or not pay_status:
+                        df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                        not_pushed_count += 1
+                    else:
+                        df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                        not_pushed_count += 1
 
         # Format SLA Date column to show only Date (no Time) in output report
         if target_sla_col in df_pending.columns:
@@ -858,6 +908,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
 
         filtered_discrepancies.extend(discs)
 
+    # Append missing in TC discrepancies
+    filtered_discrepancies.extend(missing_tc_discrepancies)
+
     df_discrepancies = pd.DataFrame(filtered_discrepancies) if filtered_discrepancies else pd.DataFrame(columns=[
         "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
@@ -925,18 +978,8 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                     if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
                         continue
                         
-                    # Apply channel filter requirements:
-                    if country == "SG" and chan in ["Lazada", "Shopee", "Zalora"]:
-                        row_dict = row.to_dict()
-                        row_dict["Country"] = country
-                        row_dict["Channel"] = f"{chan} {country}"
-                        c_rows.append(row_dict)
-                    elif country == "MY" and chan in ["Lazada", "Shopee", "Zalora", "TikTok"]:
-                        row_dict = row.to_dict()
-                        row_dict["Country"] = country
-                        row_dict["Channel"] = f"{chan} {country}"
-                        c_rows.append(row_dict)
-                    elif country == "PH" and chan in ["Lazada", "Shopee", "Zalora"]:
+                    # Accept all channels dynamically
+                    if country in ["SG", "MY", "PH"]:
                         row_dict = row.to_dict()
                         row_dict["Country"] = country
                         row_dict["Channel"] = f"{chan} {country}"
