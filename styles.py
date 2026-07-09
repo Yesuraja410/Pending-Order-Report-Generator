@@ -11,20 +11,20 @@ def inject_css():
     }
 
     .stApp {
-        background: #0f1117;
-        color: #e2e8f0;
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 50%, #bae6fd 100%);
+        color: #0f172a;
     }
 
     section[data-testid="stSidebar"] {
-        background: #1a1f2e;
-        border-right: 1px solid #2d3748;
+        background: rgba(224, 242, 254, 0.9) !important;
+        border-right: 1px solid #93c5fd;
     }
 
     section[data-testid="stSidebar"] .stSelectbox label,
     section[data-testid="stSidebar"] .stFileUploader label,
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
-        color: #a0aec0 !important;
+        color: #0369a1 !important;
         font-size: 0.82rem;
         font-weight: 600;
         letter-spacing: 0.05em;
@@ -32,69 +32,75 @@ def inject_css():
     }
 
     [data-testid="metric-container"] {
-        background: #1a1f2e;
-        border: 1px solid #2d3748;
+        background: rgba(255, 255, 255, 0.85);
+        border: 1px solid #93c5fd;
         border-radius: 8px;
         padding: 12px 16px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
     }
 
     [data-testid="metric-container"] label {
-        color: #718096 !important;
+        color: #0369a1 !important;
         font-size: 0.75rem !important;
+        font-weight: 600;
     }
 
     [data-testid="metric-container"] [data-testid="stMetricValue"] {
-        color: #63b3ed !important;
+        color: #0284c7 !important;
         font-family: 'IBM Plex Mono', monospace;
     }
 
     .stTabs [data-baseweb="tab-list"] {
-        background: #1a1f2e;
+        background: rgba(255, 255, 255, 0.7);
         border-radius: 8px;
         padding: 4px;
+        border: 1px solid #cbd5e1;
     }
 
     .stTabs [data-baseweb="tab"] {
-        color: #718096;
+        color: #475569;
         font-weight: 600;
         font-size: 0.82rem;
     }
 
     .stTabs [aria-selected="true"] {
-        color: #63b3ed !important;
-        background: #2d3748 !important;
+        color: #0284c7 !important;
+        background: #ffffff !important;
         border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
 
     .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #3182ce, #2b6cb0);
+        background: linear-gradient(135deg, #0284c7, #0369a1);
         color: white;
         border: none;
         border-radius: 6px;
         font-weight: 600;
         letter-spacing: 0.04em;
         transition: all 0.2s;
+        box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.2);
     }
 
     .stButton > button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #4299e1, #3182ce);
+        background: linear-gradient(135deg, #0ea5e9, #0284c7);
         transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(49,130,206,0.4);
+        box-shadow: 0 6px 12px rgba(2, 132, 199, 0.3);
     }
 
     .stDataFrame {
-        border: 1px solid #2d3748;
+        border: 1px solid #93c5fd;
         border-radius: 8px;
+        background: #ffffff;
     }
 
     h1 {
-        color: #e2e8f0 !important;
+        color: #0369a1 !important;
         font-weight: 700 !important;
         letter-spacing: -0.02em !important;
     }
 
     h3 {
-        color: #a0aec0 !important;
+        color: #0284c7 !important;
         font-weight: 600 !important;
         font-size: 1rem !important;
     }
@@ -102,7 +108,7 @@ def inject_css():
     .streamlit-expanderHeader {
         font-size: 0.85rem !important;
         font-weight: 600;
-        color: #a0aec0 !important;
+        color: #0369a1 !important;
     }
 
     /* Custom download button container matching screenshot */
