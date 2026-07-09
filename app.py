@@ -34,28 +34,38 @@ with st.sidebar:
     gsheet_url = st.text_input("1. Pending Order Report (Google Sheet Link)", placeholder="https://docs.google.com/spreadsheets/d/...")
     order_pending = gsheet_url if gsheet_url.strip() else None
         
-    order_tc = st.file_uploader("2. Marketplace Order Reports (TC Reports - Multiple Upload)", type=["xlsx","xls","csv"], accept_multiple_files=True, key="order_tc")
-    order_oms = st.file_uploader("3. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
+    order_tc = st.file_uploader("2. TC Order Report", type=["xlsx","xls","csv"], key="order_tc")
+    marketplace_reports = st.file_uploader("3. Market Place Reports (Multiple Upload)", type=["xlsx","xls","csv"], accept_multiple_files=True, key="marketplace_reports")
+    order_oms = st.file_uploader("4. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
     
     st.markdown("---")
     run_btn = st.button("Run Order Validation", use_container_width=True, type="primary")
 
 # == Main Screen ===============================================================
 # Check if files are uploaded
-if not (order_tc and order_oms):
-    st.info("Please upload at least the TC Report (All file) and OMS Report (Sales Order file) in the sidebar to get started.")
+has_tc = (order_tc is not None) or (marketplace_reports is not None and len(marketplace_reports) > 0)
+
+if not (has_tc and order_oms):
+    st.info("Please upload at least the TC Order Report or Market Place Reports, and the OMS Report (Sales Order file) in the sidebar to get started.")
 else:
     # Display active mode banner
     if order_pending:
-        st.success("🎯 **Full Validation Mode (GSheet SLA)**: Pending Order Report, TC Report, and OMS Report are ready for processing.")
+        st.success("🎯 **Full Validation Mode (GSheet SLA)**: Pending Order Report, TC/Marketplace Reports, and OMS Report are ready for processing.")
     else:
-        st.success("🎯 **Validation Mode (TC Pending)**: Pending orders will be extracted from TC Report (status NEW, READY TO SHIP, ACCEPTED/PICKED) and reconciled against OMS Report.")
+        st.success("🎯 **Validation Mode (TC Pending)**: Pending orders will be extracted from TC/Marketplace reports and reconciled against OMS Report.")
 
     # Trigger validation either by clicking sidebar button or main screen button
     if run_btn or st.button("Run Validation & Analysis", type="primary", use_container_width=True):
         with st.spinner("Processing reports and running validations..."):
             try:
-                res = process_and_validate_orders(order_pending, order_tc, order_oms, None)
+                # Combine TC Order Report and Market Place Reports into one list
+                tc_files_list = []
+                if order_tc is not None:
+                    tc_files_list.append(order_tc)
+                if marketplace_reports:
+                    tc_files_list.extend(marketplace_reports)
+                
+                res = process_and_validate_orders(order_pending, tc_files_list, order_oms, None)
                 st.session_state["order_enriched_df"] = res["enriched_pending_df"]
                 st.session_state["order_disc_df"] = res["discrepancies_df"]
                 st.session_state["order_summary"] = res["summary"]
