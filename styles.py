@@ -15,22 +15,81 @@ def inject_css():
         color: #0f172a;
     }
 
+    /* == Sidebar Custom overrides to guarantee absolute high visibility and bold headers == */
     section[data-testid="stSidebar"] {
-        background: rgba(224, 242, 254, 0.9) !important;
+        background: #e0f2fe !important; /* Light sky blue background */
         border-right: 1px solid #93c5fd;
     }
 
-    section[data-testid="stSidebar"] .stSelectbox label,
-    section[data-testid="stSidebar"] .stFileUploader label,
-    section[data-testid="stSidebar"] h2,
-    section[data-testid="stSidebar"] h3 {
-        color: #0369a1 !important;
-        font-size: 0.82rem;
-        font-weight: 600;
-        letter-spacing: 0.05em;
+    /* Target all headers, labels, descriptions and text in sidebar to be extremely bold and dark slate */
+    section[data-testid="stSidebar"] h2 {
+        color: #0c4a6e !important; /* Dark sky blue */
+        font-size: 1.4rem !important;
+        font-weight: 800 !important;
+        border-bottom: 2.5px solid #0c4a6e;
+        padding-bottom: 8px;
+        margin-bottom: 16px;
         text-transform: uppercase;
+        letter-spacing: 0.05em;
     }
 
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+    section[data-testid="stSidebar"] .stMarkdown p {
+        color: #0f172a !important; /* Pure dark slate for absolute contrast */
+        font-weight: 700 !important; /* Bold */
+        font-size: 0.95rem !important;
+        margin-bottom: 4px !important;
+    }
+
+    /* Target text descriptions/sub-paragraphs to be bold and clear but slightly smaller than headings */
+    section[data-testid="stSidebar"] .stMarkdown p {
+        font-size: 0.9rem !important;
+        color: #334155 !important; /* Slate 700 */
+        font-weight: 600 !important;
+    }
+
+    /* Override input elements in the sidebar to be light background with dark text */
+    section[data-testid="stSidebar"] input {
+        background-color: #ffffff !important;
+        color: #0f172a !important;
+        border: 1.5px solid #93c5fd !important;
+        border-radius: 6px !important;
+        font-weight: 600 !important;
+    }
+
+    /* Override File Upload drag and drop box to be clean light background with bold dark text */
+    section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+        background-color: #ffffff !important;
+        border: 2px dashed #0284c7 !important;
+        border-radius: 8px !important;
+    }
+
+    section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] div {
+        color: #0f172a !important;
+        font-weight: 700 !important;
+    }
+
+    section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] small {
+        color: #475569 !important; /* Slate 600 */
+        font-weight: 600 !important;
+    }
+
+    /* Override file upload list files to be clearly visible */
+    section[data-testid="stSidebar"] [data-testid="stUploadedFile"] {
+        background-color: #f0f9ff !important;
+        border: 1px solid #bae6fd !important;
+        color: #0f172a !important;
+        font-weight: 600 !important;
+    }
+
+    section[data-testid="stSidebar"] [data-testid="stUploadedFile"] span {
+        color: #0f172a !important;
+        font-weight: 600 !important;
+    }
+
+    /* == Key Metrics & Body Components == */
     [data-testid="metric-container"] {
         background: rgba(255, 255, 255, 0.85);
         border: 1px solid #93c5fd;
