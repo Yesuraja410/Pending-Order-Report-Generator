@@ -385,12 +385,32 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
     """
     # == 1. Load DataFrames ====================================================
-    df_tc = load_file_safely(tc_file)
-    df_oms = load_file_safely(oms_file)
+    # Load TC file(s) - supports single or multiple uploaded files
+    if isinstance(tc_file, list):
+        tc_dfs = []
+        for f in tc_file:
+            sub_df = load_file_safely(f)
+            if not sub_df.empty:
+                tc_dfs.append(sub_df)
+        df_tc = pd.concat(tc_dfs, ignore_index=True) if tc_dfs else pd.DataFrame()
+    else:
+        df_tc = load_file_safely(tc_file)
+
+    # Load OMS file(s) - supports single or multiple uploaded files
+    if isinstance(oms_file, list):
+        oms_dfs = []
+        for f in oms_file:
+            sub_df = load_file_safely(f)
+            if not sub_df.empty:
+                oms_dfs.append(sub_df)
+        df_oms = pd.concat(oms_dfs, ignore_index=True) if oms_dfs else pd.DataFrame()
+    else:
+        df_oms = load_file_safely(oms_file)
+
     df_contacts = load_file_safely(contacts_file) if contacts_file is not None else pd.DataFrame()
 
     if df_tc.empty:
-        raise ValueError("TC Report (All file) is empty or could not be loaded.")
+        raise ValueError("Marketplace Order Reports (TC Reports) are empty or could not be loaded.")
     if df_oms.empty:
         raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
 
