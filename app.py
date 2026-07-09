@@ -24,7 +24,7 @@ inject_css()
 
 # Custom title and introduction
 st.title("Pending Order SLA Enrichment & OMS Status Validation")
-st.write("Upload the daily SLA Report, TC Report (All file), and OMS Report (Sales Order file) in the sidebar to run validations and email reports directly to the sellers.")
+st.write("Upload the daily SLA Report (GSheet Link), Marketplace Order Reports (TC Reports), and OMS Report (Sales Order file) in the sidebar to run validations and email reports directly to the sellers.")
 
 # == Sidebar ==================================================================-
 with st.sidebar:
@@ -34,9 +34,8 @@ with st.sidebar:
     gsheet_url = st.text_input("1. Pending Order Report (Google Sheet Link)", placeholder="https://docs.google.com/spreadsheets/d/...")
     order_pending = gsheet_url if gsheet_url.strip() else None
         
-    order_tc = st.file_uploader("2. TC Report (All file)", type=["xlsx","xls","csv"], key="order_tc")
+    order_tc = st.file_uploader("2. Marketplace Order Reports (TC Reports - Multiple Upload)", type=["xlsx","xls","csv"], accept_multiple_files=True, key="order_tc")
     order_oms = st.file_uploader("3. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
-    seller_contacts = st.file_uploader("4. Seller Contact List (Optional)", type=["xlsx","xls","csv"], key="seller_contacts")
     
     st.markdown("---")
     run_btn = st.button("Run Order Validation", use_container_width=True, type="primary")
@@ -56,7 +55,7 @@ else:
     if run_btn or st.button("Run Validation & Analysis", type="primary", use_container_width=True):
         with st.spinner("Processing reports and running validations..."):
             try:
-                res = process_and_validate_orders(order_pending, order_tc, order_oms, seller_contacts)
+                res = process_and_validate_orders(order_pending, order_tc, order_oms, None)
                 st.session_state["order_enriched_df"] = res["enriched_pending_df"]
                 st.session_state["order_disc_df"] = res["discrepancies_df"]
                 st.session_state["order_summary"] = res["summary"]
