@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-# VERSION: v5 - Google Sheets & Excel Styling Update
+# VERSION: v6 - MCP Integration Update
 import pandas as pd
 import numpy as np
 import io
 import re
 import urllib.request
 import urllib.error
+import json
+import os
+import requests
 from datetime import datetime
 
 def get_google_sheet_download_url(url):
@@ -235,6 +238,136 @@ def load_file_safely(file):
     except Exception as e:
         raise ValueError(f"Failed to read file {getattr(file, 'name', 'Google Sheet')}: {str(e)}")
 
+def fetch_pending_from_mcp():
+    """
+    Fetch pending orders list directly from PUMA MCP Database.
+    """
+    token_file = r"C:\Users\Yesuraja\.gemini\antigravity\brain\abf6c61b-3147-45f7-90e4-f03458ddd1ae\scratch\token_data.json"
+    if not os.path.exists(token_file):
+        raise ValueError("MCP Token not found. Please authenticate with the MCP server in the sidebar first.")
+        
+    with open(token_file, "r") as f:
+        token_data = json.load(f)
+        
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise ValueError("Access token not found in token_data.json. Please re-authenticate.")
+        
+    mcp_url = "https://mcp.graas.ai/mcp/GED"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    # 1. Initialize session
+    init_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "Antigravity-Client",
+                "version": "1.0.0"
+            }
+        }
+    }
+    
+    try:
+        r_init = requests.post(mcp_url, json=init_payload, headers=headers, timeout=15)
+        if r_init.status_code == 401:
+            raise PermissionError("Access token expired or unauthorized. Please re-authenticate in the sidebar.")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"Failed to connect to MCP server: {str(e)}")
+        
+    query = """
+    SELECT 
+        oi.ORDER_ID AS "orderID",
+        oi.SELLER_ID AS "merchantID",
+        oi.ORDER_CREATED_REPORT_TS AS "timeOrderCreated",
+        oi.ORDER_ID AS "orderNumber",
+        oi.ORDER_STATUS AS "orderStatus",
+        oi.ORDER_ITEM_STATUS AS "orderItems.orderStatus",
+        oi.PAYMENT_STATUS AS "paymentStatus",
+        o.PAYMENT_METHOD AS "paymentMethods",
+        oi.SELLER_SKU AS "orderItems.customSKU",
+        NULL AS "shippingDeadLine",
+        o.SHIPPING_METHOD AS "courierName",
+        NULL AS "airwaybill",
+        oi.SHIPPING_STATUS AS "omsStatus",
+        oi.CHANNEL_NAME AS "storeName"
+    FROM ORDER_ITEMS_METRICS oi
+    LEFT JOIN ORDER_METRICS o ON oi.ORDER_ID = o.ORDER_ID
+    WHERE oi.ORDER_STATUS IN ('UNPAID', 'INITIATED', 'PROCESSING', 'ACCEPTED', 'AWAITING_COLLECTION', 'AWAITING_SHIPMENT')
+    """
+    
+    call_payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "query_data",
+            "arguments": {
+                "sql_query": query,
+                "question": "Fetch pending orders list for seller"
+            }
+        }
+    }
+    
+    try:
+        r = requests.post(mcp_url, json=call_payload, headers=headers, timeout=30)
+        if r.status_code == 401:
+            raise PermissionError("Access token expired or unauthorized. Please re-authenticate in the sidebar.")
+            
+        if r.status_code != 200:
+            raise ValueError(f"MCP Server returned status code {r.status_code}: {r.text}")
+            
+        res = r.json()
+        if "error" in res:
+            raise ValueError(f"MCP Server Error: {res['error'].get('message', 'Unknown error')}")
+            
+        result_data = res.get("result", {})
+        structured = result_data.get("structuredContent", {})
+        
+        columns = []
+        rows = []
+        
+        if structured:
+            columns = structured.get("columns", [])
+            rows = structured.get("rows", [])
+        else:
+            # Fallback to content[0].text
+            content_list = result_data.get("content", [])
+            if content_list:
+                try:
+                    parsed = json.loads(content_list[0].get("text", "{}"))
+                    if isinstance(parsed, dict) and "rows" in parsed:
+                        columns = parsed.get("columns", [])
+                        rows = parsed.get("rows", [])
+                except Exception:
+                    pass
+                    
+        if not rows:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(rows, columns=columns)
+        
+        # Construct mapped DataFrame matching expected structure of Pending Order Report
+        df_pending = pd.DataFrame()
+        df_pending["Order ID"] = df["orderID"].astype(str)
+        # Clean channel name to PUMA-like or simple format
+        df_pending["Store Name"] = df["storeName"].fillna(df["merchantID"]).astype(str)
+        # Empty string for SLA (will be enriched from TC Report)
+        df_pending["SLA"] = ""
+        # Format date
+        df_pending["Order Date"] = df["timeOrderCreated"].astype(str).apply(lambda x: x.split("T")[0] if "T" in x else x)
+        
+        return df_pending
+    except Exception as e:
+        raise ValueError(f"Failed to fetch pending orders from DB: {str(e)}")
+
 def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=None):
     """
     Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
@@ -249,7 +382,9 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
     if df_oms.empty:
         raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
 
-    if pending_file:
+    if pending_file == "mcp":
+        df_pending = fetch_pending_from_mcp()
+    elif pending_file:
         if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
             pending_file = download_google_sheet(pending_file)
         df_pending = load_file_safely(pending_file)
