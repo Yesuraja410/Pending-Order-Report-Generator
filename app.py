@@ -3,6 +3,8 @@ import io
 import os
 import gc
 import tempfile
+import json
+import requests
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -29,8 +31,88 @@ with st.sidebar:
     st.markdown("## Configuration")
     st.markdown("Upload the daily reports below:")
     
-    gsheet_url = st.text_input("1. Pending Order Report (Google Sheet Link)", placeholder="https://docs.google.com/spreadsheets/d/...")
-    order_pending = gsheet_url if gsheet_url.strip() else None
+    pending_source = st.selectbox(
+        "1. Pending Order Report Source",
+        ["Google Sheet Link", "Upload File", "Fetch from DB (MCP Server)"]
+    )
+    
+    order_pending = None
+    if pending_source == "Google Sheet Link":
+        gsheet_url = st.text_input("Pending Order Report (Google Sheet Link)", placeholder="https://docs.google.com/spreadsheets/d/...")
+        order_pending = gsheet_url if gsheet_url.strip() else None
+    elif pending_source == "Upload File":
+        uploaded_pending = st.file_uploader("Upload Pending Order Report (SLA Report)", type=["xlsx","xls","csv"], key="order_pending_upload")
+        order_pending = uploaded_pending
+    else:
+        # Fetch from DB (MCP Server)
+        token_file = r"C:\Users\Yesuraja\.gemini\antigravity\brain\abf6c61b-3147-45f7-90e4-f03458ddd1ae\scratch\token_data.json"
+        has_token = os.path.exists(token_file)
+        
+        if not has_token:
+            st.warning("⚠️ MCP Authorization required.")
+            client_id = "bVsPfvtJYPMP_MblEbImVw"
+            redirect_uri = "https://oauth.pstmn.io/v1/callback"
+            
+            if "pkce_verifier" not in st.session_state:
+                import secrets, hashlib, base64
+                verifier = secrets.token_urlsafe(64)
+                sha = hashlib.sha256(verifier.encode('utf-8')).digest()
+                challenge = base64.urlsafe_b64encode(sha).decode('utf-8').replace('=', '')
+                st.session_state["pkce_verifier"] = verifier
+                st.session_state["pkce_challenge"] = challenge
+                st.session_state["pkce_state"] = secrets.token_hex(16)
+                
+            auth_url = (
+                "https://mcp.graas.ai/authorize?"
+                f"response_type=code&"
+                f"client_id={client_id}&"
+                f"redirect_uri={redirect_uri}&"
+                f"scope=read:data%20read:schema&"
+                f"state={st.session_state['pkce_state']}&"
+                f"code_challenge={st.session_state['pkce_challenge']}&"
+                f"code_challenge_method=S256"
+            )
+            
+            st.markdown(f"[🔗 Click to Authorize MCP]({auth_url})")
+            redirect_url_input = st.text_input("Paste the redirected URL here:", key="mcp_redirect_url")
+            if st.button("Complete Authorization"):
+                if redirect_url_input.strip():
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        parsed = urlparse(redirect_url_input.strip())
+                        params = parse_qs(parsed.query)
+                        code = params.get("code", [None])[0]
+                        if not code:
+                            st.error("No authorization code found in the URL. Please verify.")
+                        else:
+                            token_url = "https://mcp.graas.ai/token"
+                            payload = {
+                                "grant_type": "authorization_code",
+                                "client_id": client_id,
+                                "code": code,
+                                "redirect_uri": redirect_uri,
+                                "code_verifier": st.session_state["pkce_verifier"]
+                            }
+                            r = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15)
+                            if r.status_code == 200:
+                                token_data = r.json()
+                                os.makedirs(os.path.dirname(token_file), exist_ok=True)
+                                with open(token_file, "w") as tf:
+                                    json.dump(token_data, tf)
+                                st.success("Authorization successful!")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to fetch token: {r.text}")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+        else:
+            st.success("✅ MCP Authorization active.")
+            if st.button("Disconnect / Re-authorize"):
+                if os.path.exists(token_file):
+                    os.remove(token_file)
+                st.session_state.pop("pkce_verifier", None)
+                st.rerun()
+            order_pending = "mcp"
         
     order_tc = st.file_uploader("2. TC Report (All file)", type=["xlsx","xls","csv"], key="order_tc")
     order_oms = st.file_uploader("3. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
@@ -45,7 +127,9 @@ if not (order_tc and order_oms):
     st.info("Please upload at least the TC Report (All file) and OMS Report (Sales Order file) in the sidebar to get started.")
 else:
     # Display active mode banner
-    if order_pending:
+    if order_pending == "mcp":
+        st.success("🎯 **MCP Database Automation Mode**: Pending Order Report will be queried directly from PUMA Database, enriched with TC Report, and reconciled against OMS Report.")
+    elif order_pending:
         st.success("🎯 **Full Validation Mode (GSheet SLA)**: Pending Order Report, TC Report, and OMS Report are ready for processing.")
     else:
         st.success("🎯 **Validation Mode (TC Pending)**: Pending orders will be extracted from TC Report (status NEW, READY TO SHIP, ACCEPTED/PICKED) and reconciled against OMS Report.")
