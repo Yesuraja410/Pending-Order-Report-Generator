@@ -103,20 +103,28 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
     title_end_col = len(pivot_df.columns) if not pivot_df.empty else 6
     ws_summary.merge_cells(start_row=2, start_column=1, end_row=2, end_column=title_end_col)
     
-    title_cell = ws_summary.cell(row=2, column=1, value=f"Pending Orders - PUMA {country}")
-    title_cell.font = FONT_TITLE
+    title_cell = ws_summary.cell(row=2, column=1, value=f"🐾 PUMA {country} - Pending Orders")
+    
+    # Custom PUMA brand styling (PUMA Red background, white bold text)
+    puma_red_fill = PatternFill(start_color="BA0C2F", end_color="BA0C2F", fill_type="solid")
+    font_title_white = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+    
+    title_cell.fill = puma_red_fill
+    title_cell.font = font_title_white
     title_cell.alignment = Alignment(horizontal='center', vertical='center')
     
-    # Apply borders around Title cell block
+    # Apply background fill and borders around Title cell block
     for col_idx in range(1, title_end_col + 1):
-        ws_summary.cell(row=2, column=col_idx).border = thin_border
+        cell_block = ws_summary.cell(row=2, column=col_idx)
+        cell_block.fill = puma_red_fill
+        cell_block.border = thin_border
         
-    # ── Pivot Table (Starting at A4) ──
+    # ── Pivot Table (Starting at A3 - no gap) ──
     if not pivot_df.empty:
         # Write headers
         headers = list(pivot_df.columns)
         for col_idx, header in enumerate(headers, start=1):
-            cell = ws_summary.cell(row=4, column=col_idx, value=header)
+            cell = ws_summary.cell(row=3, column=col_idx, value=header)
             cell.font = FONT_BOLD
             cell.alignment = Alignment(horizontal='center', vertical='center')
             cell.border = thin_border
@@ -124,7 +132,7 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
         # Write rows
         # Classic Pivot: consecutive duplicate channels are left blank
         last_channel = None
-        for row_idx, row_data in enumerate(pivot_df.itertuples(index=False), start=5):
+        for row_idx, row_data in enumerate(pivot_df.itertuples(index=False), start=4):
             is_grand_total_row = (row_data[0] == "Grand Total")
             
             for col_idx, val in enumerate(row_data, start=1):
@@ -178,7 +186,7 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
                                 cell.fill = FILL_RED
                                 cell.font = FONT_WHITE_BOLD
                                 
-    # ── Highlight Metrics Table (Starting after the Pivot Table with 1 column gap) ──
+    # ── Highlight Metrics Table (Starting at row 3 - no gap) ──
     start_col = (len(pivot_df.columns) + 2) if not pivot_df.empty else 11
     metrics_map = {}
     if not summary_df.empty:
@@ -193,7 +201,7 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
     ]
     
     for idx, (original_name, display_name, fill, font) in enumerate(metrics_list):
-        row_pos = 4 + idx
+        row_pos = 3 + idx
         
         # Metric Label
         cell_lbl = ws_summary.cell(row=row_pos, column=start_col, value=display_name)
