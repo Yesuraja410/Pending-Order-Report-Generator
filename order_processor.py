@@ -704,6 +704,9 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                 oms_stat = _clean_str(row.get("OMS Order Status", ""))
                 if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
                     continue
+                sla_val = row.get(target_sla_col)
+                if _is_blank(sla_val) or str(sla_val).strip() == "#N/A":
+                    continue
                 row_dict = row.to_dict()
                 row_dict["Country"] = country
                 row_dict["Channel"] = f"{chan} {country}"
@@ -1706,6 +1709,9 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     
                     # Ignore Unpaid orders and OMS shipped orders in country wise output reports
                     if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
+                        continue
+                    sla_val = row.get(target_sla_col)
+                    if _is_blank(sla_val) or str(sla_val).strip() == "#N/A":
                         continue
                         
                     # Accept all channels dynamically
