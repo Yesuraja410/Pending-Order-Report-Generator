@@ -163,6 +163,20 @@ def _is_blank(val):
     s = str(val).strip().replace('\r', '').replace('\n', '')
     return not s or s.lower() in ("nan", "none", "nat", "null", "undefined", "nat")
 
+def normalize_ean(val):
+    if pd.isna(val):
+        return ""
+    s = str(val).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if digits:
+        if len(digits) >= 13:
+            return digits[-13:]
+        else:
+            return digits.zfill(13)
+    return s
+
 def extract_date(val):
     """Extract a YYYY-MM-DD date from various timestamp formats."""
     s = str(val).strip()
@@ -411,7 +425,16 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         raise KeyError(f"Could not find 'Order ID' column in OMS Report. Available: {list(df_oms.columns)}")
     df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
 
-    oms_status_map = df_oms.set_index(oms_id_col)[oms_status_col].dropna().to_dict() if oms_status_col else {}
+    oms_status_map = {}
+    oms_ean_col = _find_column(df_oms, ["ean", "EAN", "Ean", "item_sku", "SKU"])
+    
+    if oms_id_col:
+        for _, row in df_oms.iterrows():
+            oid = _clean_order_id(row[oms_id_col])
+            ean = normalize_ean(row.get(oms_ean_col)) if oms_ean_col else ""
+            key = oid + ean
+            if oms_status_col and oms_status_col in row:
+                oms_status_map[key] = row[oms_status_col]
 
     df_pending["OMS Order Status"] = ""
     df_pending["Final Remarks"] = ""
@@ -459,55 +482,160 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     
     # Check what status column GSheet has for orders
     pend_status_col = _find_column(df_pending, ["order_status", "status", "Item Status", "orderItems.orderStatus", "TC Status"])
+    pend_sku_col = _find_column(df_pending, ["custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
 
     for idx, row in df_pending.iterrows():
         order_id = row[pend_id_col]
         order_id_str = str(order_id).strip()
         store_val = _clean_str(row.get(target_store_col, ""))
+        sku_val = normalize_ean(row.get(pend_sku_col)) if pend_sku_col else ""
+        key = order_id_str + sku_val
         
-        if order_id_str in oms_status_map:
-            oms_stat = oms_status_map[order_id_str]
+        is_gsheet_cancelled = False
+        if pend_status_col:
+            pend_stat_raw = _clean_str(row.get(pend_status_col, ""))
+            pend_norm = _normalize_status_val(pend_stat_raw)
+            if "cancel" in pend_norm:
+                is_gsheet_cancelled = True
+                
+        is_in_oms = False
+        oms_stat = ""
+        
+        if key in oms_status_map:
+            is_in_oms = True
+            oms_stat = oms_status_map[key]
+        else:
+            # Fallback to Order ID check
+            matching_keys = [k for k in oms_status_map if k.startswith(order_id_str)]
+            if matching_keys:
+                is_in_oms = True
+                oms_stat = oms_status_map[matching_keys[0]]
+                
+        if is_in_oms:
             df_pending.at[idx, "OMS Order Status"] = oms_stat
             df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
             pushed_count += 1
             
-            # Check for status mismatch if GSheet has a status
             if pend_status_col:
-                pend_stat = _clean_str(row.get(pend_status_col, ""))
-                if pend_stat:
-                    # Normalize for mismatch check
-                    pend_norm = _normalize_status_val(pend_stat)
+                pend_stat_raw = _clean_str(row.get(pend_status_col, ""))
+                if pend_stat_raw:
+                    pend_norm = _normalize_status_val(pend_stat_raw)
                     oms_norm = _normalize_status_val(oms_stat)
                     
-                    if pend_norm != oms_norm:
-                        if not (oms_norm == "shipped" and pend_norm in ("completed", "shipped", "paid")):
+                    # Rule 1: Cancelled status check
+                    is_tc_cancelled = ("cancel" in pend_norm)
+                    is_oms_cancelled = ("cancel" in oms_norm)
+                    if (is_tc_cancelled or is_oms_cancelled) and (is_tc_cancelled != is_oms_cancelled):
+                        is_oms_returned = ("return" in oms_norm)
+                        if not (is_tc_cancelled and is_oms_returned):
                             discrepancies.append({
                                 "Order ID": order_id_str,
                                 "Nickname": store_val,
-                                "SKU": "",
-                                "Validation Result": "Status Mismatch",
-                                "TC Order Status": pend_stat,
-                                "TC Item Status": pend_stat,
+                                "SKU": sku_val,
+                                "Validation Result": "Cancelled Status Mismatch",
+                                "TC Order Status": pend_stat_raw,
+                                "TC Item Status": pend_stat_raw,
                                 "OMS Order Status": oms_stat,
                                 "OMS Line Status": oms_stat,
-                                "Details": f"Status mismatch: GSheet pending status is '{pend_stat}', but OMS status is '{oms_stat}'."
+                                "Details": f"Cancelled status mismatch: Pending is '{pend_stat_raw}', OMS is '{oms_stat}'."
                             })
+
+                    # Rule 2: OMS Packed and TC/GSheet Status if New can highlight
+                    if "packed" in oms_norm and "new" in pend_norm:
+                        discrepancies.append({
+                            "Order ID": order_id_str,
+                            "Nickname": store_val,
+                            "SKU": sku_val,
+                            "Validation Result": "OMS Packed but TC New",
+                            "TC Order Status": pend_stat_raw,
+                            "TC Item Status": pend_stat_raw,
+                            "OMS Order Status": oms_stat,
+                            "OMS Line Status": oms_stat,
+                            "Details": f"OMS status is Packed, but Pending status is '{pend_stat_raw}' (should be READY TO SHIP or ACCEPTED/PICKED)."
+                        })
+
+                    # Rule 3: OMS Status is Shipped and TC/GSheet status is NEW, READY TO SHIP, ACCEPTED/PICKED, Cancelled
+                    if "shipped" in oms_norm:
+                        is_tc_invalid = False
+                        for val in ["new", "ready to ship", "accepted", "picked", "cancel"]:
+                            if val in pend_norm:
+                                is_tc_invalid = True
+                                break
+                        if is_tc_invalid:
+                            discrepancies.append({
+                                "Order ID": order_id_str,
+                                "Nickname": store_val,
+                                "SKU": sku_val,
+                                "Validation Result": "OMS Shipped but TC Status Invalid",
+                                "TC Order Status": pend_stat_raw,
+                                "TC Item Status": pend_stat_raw,
+                                "OMS Order Status": oms_stat,
+                                "OMS Line Status": oms_stat,
+                                "Details": f"OMS status is Shipped, but Pending status is '{pend_stat_raw}'."
+                            })
+
+                    # Rule 4: TC/GSheet is Delivered and OMS is not Delivered
+                    if "delivered" in pend_norm and "delivered" not in oms_norm:
+                        discrepancies.append({
+                            "Order ID": order_id_str,
+                            "Nickname": store_val,
+                            "SKU": sku_val,
+                            "Validation Result": "TC Delivered but OMS not Delivered",
+                            "TC Order Status": pend_stat_raw,
+                            "TC Item Status": pend_stat_raw,
+                            "OMS Order Status": oms_stat,
+                            "OMS Line Status": oms_stat,
+                            "Details": f"Pending status is Delivered, but OMS status is '{oms_stat}'."
+                        })
+
+                    # Rule 5: TC/GSheet is Returned and OMS is not Returned
+                    if "returned" in pend_norm and not ("returned" in oms_norm or "return" in oms_norm):
+                        discrepancies.append({
+                            "Order ID": order_id_str,
+                            "Nickname": store_val,
+                            "SKU": sku_val,
+                            "Validation Result": "TC Returned but OMS not Returned",
+                            "TC Order Status": pend_stat_raw,
+                            "TC Item Status": pend_stat_raw,
+                            "OMS Order Status": oms_stat,
+                            "OMS Line Status": oms_stat,
+                            "Details": f"Pending status is Returned, but OMS status is '{oms_stat}'."
+                        })
+
+                    # Rule 6: TC/GSheet Delivery Failed and OMS is not Returned
+                    if "failed" in pend_norm and not ("returned" in oms_norm or "return" in oms_norm):
+                        discrepancies.append({
+                            "Order ID": order_id_str,
+                            "Nickname": store_val,
+                            "SKU": sku_val,
+                            "Validation Result": "TC Delivery Failed but OMS not Returned",
+                            "TC Order Status": pend_stat_raw,
+                            "TC Item Status": pend_stat_raw,
+                            "OMS Order Status": oms_stat,
+                            "OMS Line Status": oms_stat,
+                            "Details": f"Pending status is Delivery Failed, but OMS status is '{oms_stat}'."
+                        })
         else:
-            df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
-            df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-            not_pushed_count += 1
-            
-            discrepancies.append({
-                "Order ID": order_id_str,
-                "Nickname": store_val,
-                "SKU": "",
-                "Validation Result": "Not Pushed to OMS",
-                "TC Order Status": "N/A",
-                "TC Item Status": "N/A",
-                "OMS Order Status": "Not in OMS",
-                "OMS Line Status": "Not in OMS",
-                "Details": "Order ID is present in Pending SLA report but missing from OMS Report."
-            })
+            if is_gsheet_cancelled:
+                # Rule 1 exception: If TC status cancelled and OMS order not found, ignore!
+                df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                df_pending.at[idx, "Final Remarks"] = "Cancelled (Ignored)"
+            else:
+                df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                not_pushed_count += 1
+                
+                discrepancies.append({
+                    "Order ID": order_id_str,
+                    "Nickname": store_val,
+                    "SKU": sku_val,
+                    "Validation Result": "Not Pushed to OMS",
+                    "TC Order Status": "N/A",
+                    "TC Item Status": "N/A",
+                    "OMS Order Status": "Not in OMS",
+                    "OMS Line Status": "Not in OMS",
+                    "Details": "Order ID is present in Pending SLA report but missing from OMS Report."
+                })
 
     # Format SLA Date column
     if target_sla_col in df_pending.columns:
@@ -794,12 +922,29 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
         "ref_date_dmy": ref_date_str
     }
 
-def process_and_validate_orders(pending_file, tc_file, marketplace_file=None, oms_file=None, contacts_file=None):
-    # Backwards compatibility: if only 3 arguments are passed, marketplace_file holds the oms_file value
-    if oms_file is None and marketplace_file is not None:
-        # If we have only 3 arguments, the third one is oms_file
-        oms_file = marketplace_file
-        marketplace_file = None
+def process_and_validate_orders(pending_file, tc_file, *args, **kwargs):
+    # Resolve marketplace_file and oms_file based on positional args length
+    marketplace_file = None
+    oms_file = None
+    contacts_file = None
+    
+    if len(args) == 1:
+        # 3 positional arguments: process_and_validate_orders(pending, tc, oms)
+        oms_file = args[0]
+    elif len(args) >= 2:
+        # 4+ positional arguments: process_and_validate_orders(pending, tc, marketplace, oms, [contacts])
+        marketplace_file = args[0]
+        oms_file = args[1]
+        if len(args) >= 3:
+            contacts_file = args[2]
+            
+    # Fallback to keyword arguments if not set by positional args
+    if marketplace_file is None:
+        marketplace_file = kwargs.get('marketplace_file', None)
+    if oms_file is None:
+        oms_file = kwargs.get('oms_file', None)
+    if contacts_file is None:
+        contacts_file = kwargs.get('contacts_file', None)
 
     # Load all dataframes
     df_pending = pd.DataFrame()
@@ -1178,7 +1323,8 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     tc_custom_sku_col = _find_column(df_tc, ["custom_sku", "customSku", "custom_SKU", "sku"])
     tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
     
-    oms_ean_col = _find_column(df_oms, ["ean", "sku", "OMS sku"])
+    # In OMS report SKU is in ean header
+    oms_ean_col = _find_column(df_oms, ["ean", "sku", "OMS sku", "EAN"])
     oms_line_status_col = _find_column(df_oms, ["line_status", "order_status", "item_status"])
 
     # Fallbacks if columns are not resolved
@@ -1196,10 +1342,11 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     for _, row in df_tc.iterrows():
         oid = _clean_order_id(row[tc_id_col])
         sku = _clean_str(row[tc_custom_sku_col])
+        sku_norm = normalize_ean(sku)
         item_status = _clean_str(row[tc_item_status_col]) if tc_item_status_col else ""
         order_status = _clean_str(row[tc_status_col]) if tc_status_col else ""
-        if oid and sku:
-            key = f"{oid}_{sku}"
+        if oid:
+            key = oid + sku_norm
             tc_lookup[key] = {
                 "Order ID": oid,
                 "SKU": sku,
@@ -1213,10 +1360,11 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         oid_raw = _clean_order_id(row[oms_id_col])
         oid = tc_num_to_id.get(oid_raw, oid_raw)
         ean = _clean_str(row[oms_ean_col])
+        ean_norm = normalize_ean(ean)
         line_status = _clean_str(row[oms_line_status_col]) if oms_line_status_col else ""
         order_status = _clean_str(row[oms_status_col]) if oms_status_col else ""
-        if oid and ean:
-            key = f"{oid}_{ean}"
+        if oid:
+            key = oid + ean_norm
             oms_lookup[key] = {
                 "Order ID": oid,
                 "SKU": ean,
@@ -1249,37 +1397,27 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         tc_item_norm = _normalize_status_val(tc_item_status)
         oms_line_norm = _normalize_status_val(oms_line_status)
 
-
-        # 1. Ignore exception: OMS is Shipped and TC is RETURN REQUESTED, CANCELLED, SHIPPED (or combination CANCELLED,SHIPPED)
-        # We split by comma to handle comma-separated combinations like CANCELLED,SHIPPED
-        tc_parts = [p.strip() for p in tc_item_norm.split(",") if p.strip()]
-        if oms_line_norm == "shipped" and (
-            not tc_parts or all(part in ("shipped", "return requested", "cancelled", "canceled") for part in tc_parts)
-        ):
-            continue
-
         # Rule 1: Cancelled status check
         is_tc_cancelled = ("cancel" in tc_item_norm)
         is_oms_cancelled = ("cancel" in oms_line_norm)
-        
-        # Exception: TC status is Cancelled and OMS is Returned/Return -> Ignore mismatch!
-        is_tc_cancelled_and_oms_returned = is_tc_cancelled and ("return" in oms_line_norm)
-        
-        if is_tc_cancelled != is_oms_cancelled and not is_tc_cancelled_and_oms_returned:
-            discrepancies.append({
-                "Order ID": oid,
-                "Nickname": nickname_val,
-                "SKU": sku,
-                "Validation Result": "Cancelled Sync Mismatch",
-                "TC Order Status": tc_order_status,
-                "TC Item Status": tc_item_status,
-                "OMS Order Status": oms_order_status,
-                "OMS Line Status": oms_line_status,
-                "Details": f"Cancellation mismatch for item {sku}: TC is {tc_item_status}, OMS is {oms_line_status}."
-            })
-
-        # Rule 2: Packed status check
-        if oms_line_norm == "packed" and tc_item_norm == "new":
+        if (is_tc_cancelled or is_oms_cancelled) and (is_tc_cancelled != is_oms_cancelled):
+            # Exception: TC cancelled and OMS Returned can ignore
+            is_oms_returned = ("return" in oms_line_norm)
+            if not (is_tc_cancelled and is_oms_returned):
+                discrepancies.append({
+                    "Order ID": oid,
+                    "Nickname": nickname_val,
+                    "SKU": sku,
+                    "Validation Result": "Cancelled Status Mismatch",
+                    "TC Order Status": tc_order_status,
+                    "TC Item Status": tc_item_status,
+                    "OMS Order Status": oms_order_status,
+                    "OMS Line Status": oms_line_status,
+                    "Details": f"Cancelled status mismatch: TC is '{tc_item_status}', OMS is '{oms_line_status}'."
+                })
+                
+        # Rule 2: OMS Packed and TC Status if New can highlight
+        if "packed" in oms_line_norm and "new" in tc_item_norm:
             discrepancies.append({
                 "Order ID": oid,
                 "Nickname": nickname_val,
@@ -1289,56 +1427,70 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                 "TC Item Status": tc_item_status,
                 "OMS Order Status": oms_order_status,
                 "OMS Line Status": oms_line_status,
-                "Details": f"Discrepancy for item {sku}: OMS status is Packed, but TC status is New."
+                "Details": f"OMS status is Packed, but TC status is '{tc_item_status}' (should be READY TO SHIP or ACCEPTED/PICKED)."
             })
 
-        # Rule 3: Shipped status check
-        if oms_line_norm == "shipped":
-            # TC must have shipped or be in ignored status list. Since ignored list is handled above,
-            # if we reached here, TC is not in ignored list and OMS is Shipped, so it's a mismatch!
+        # Rule 3: If OMS Status is shipped and TC status with NEW, READY TO SHIP, ACCEPTED/PICKED & Cancelled can highlight
+        if "shipped" in oms_line_norm:
+            is_tc_invalid = False
+            for val in ["new", "ready to ship", "accepted", "picked", "cancel"]:
+                if val in tc_item_norm:
+                    is_tc_invalid = True
+                    break
+            if is_tc_invalid:
+                discrepancies.append({
+                    "Order ID": oid,
+                    "Nickname": nickname_val,
+                    "SKU": sku,
+                    "Validation Result": "OMS Shipped but TC Status Invalid",
+                    "TC Order Status": tc_order_status,
+                    "TC Item Status": tc_item_status,
+                    "OMS Order Status": oms_order_status,
+                    "OMS Line Status": oms_line_status,
+                    "Details": f"OMS status is Shipped, but TC status is '{tc_item_status}'."
+                })
+
+        # Rule 4: If TC Status is Delivered and OMS status not Delivered can highlight
+        if "delivered" in tc_item_norm and "delivered" not in oms_line_norm:
             discrepancies.append({
                 "Order ID": oid,
                 "Nickname": nickname_val,
                 "SKU": sku,
-                "Validation Result": "OMS Shipped but TC not Shipped",
+                "Validation Result": "TC Delivered but OMS not Delivered",
                 "TC Order Status": tc_order_status,
                 "TC Item Status": tc_item_status,
                 "OMS Order Status": oms_order_status,
                 "OMS Line Status": oms_line_status,
-                "Details": f"Discrepancy for item {sku}: OMS status is Shipped, but TC status is '{tc_item_status}'."
+                "Details": f"TC status is Delivered, but OMS status is '{oms_line_status}'."
             })
 
-        # Rule 4: Delivered status check
-        # Flag if TC is Delivered (contains "delivered") and OMS is New, Processing, Picked, Packed, Shipped
-        if "delivered" in tc_parts:
-            if oms_line_norm in ("new", "processing", "picked", "packed", "shipped"):
-                discrepancies.append({
-                    "Order ID": oid,
-                    "Nickname": nickname_val,
-                    "SKU": sku,
-                    "Validation Result": "TC Delivered but OMS not Delivered",
-                    "TC Order Status": tc_order_status,
-                    "TC Item Status": tc_item_status,
-                    "OMS Order Status": oms_order_status,
-                    "OMS Line Status": oms_line_status,
-                    "Details": f"Discrepancy for item {sku}: TC status is Delivered, but OMS status is '{oms_line_status}'."
-                })
+        # Rule 5: If TC Status is Returned and OMS Status not Returned can highlight
+        if "returned" in tc_item_norm and not ("returned" in oms_line_norm or "return" in oms_line_norm):
+            discrepancies.append({
+                "Order ID": oid,
+                "Nickname": nickname_val,
+                "SKU": sku,
+                "Validation Result": "TC Returned but OMS not Returned",
+                "TC Order Status": tc_order_status,
+                "TC Item Status": tc_item_status,
+                "OMS Order Status": oms_order_status,
+                "OMS Line Status": oms_line_status,
+                "Details": f"TC status is Returned, but OMS status is '{oms_line_status}'."
+            })
 
-        # Rule 5: Returned status check
-        # Flag if TC is Returned (contains "returned") and OMS is not Returned/Return
-        if "returned" in tc_parts:
-            if not ("returned" in oms_line_norm or "return" in oms_line_norm):
-                discrepancies.append({
-                    "Order ID": oid,
-                    "Nickname": nickname_val,
-                    "SKU": sku,
-                    "Validation Result": "TC Returned but OMS not Returned",
-                    "TC Order Status": tc_order_status,
-                    "TC Item Status": tc_item_status,
-                    "OMS Order Status": oms_order_status,
-                    "OMS Line Status": oms_line_status,
-                    "Details": f"Discrepancy for item {sku}: TC status is Returned, but OMS status is '{oms_line_status}'."
-                })
+        # Rule 6: If TC Status Delivery Failed and OMS not Returned can highlight
+        if "failed" in tc_item_norm and not ("returned" in oms_line_norm or "return" in oms_line_norm):
+            discrepancies.append({
+                "Order ID": oid,
+                "Nickname": nickname_val,
+                "SKU": sku,
+                "Validation Result": "TC Delivery Failed but OMS not Returned",
+                "TC Order Status": tc_order_status,
+                "TC Item Status": tc_item_status,
+                "OMS Order Status": oms_order_status,
+                "OMS Line Status": oms_line_status,
+                "Details": f"TC status is Delivery Failed, but OMS status is '{oms_line_status}'."
+            })
 
     # == Shopee Partial Cancellation Mismatch Filter ==
     filtered_discrepancies = []
@@ -1348,7 +1500,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         order_discs[disc["Order ID"]].append(disc)
 
     for oid, discs in order_discs.items():
-        has_cancel_mismatch = any(d["Validation Result"] == "Cancelled Sync Mismatch" for d in discs)
+        has_cancel_mismatch = any(d["Validation Result"] == "Cancelled Status Mismatch" for d in discs)
         if has_cancel_mismatch:
             # Check if this is a Shopee order
             sample_key = next((k for k in tc_lookup if tc_lookup[k]["Order ID"] == oid), None)
@@ -1384,11 +1536,11 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                 is_partial_tc = (0 < tc_cancelled_count < total_tc_items)
                 is_partial_oms = (0 < oms_cancelled_count < total_oms_items)
                 
-                # If either side is partially cancelled, we ignore the Cancelled Sync Mismatch
+                # If either side is partially cancelled, we ignore the Cancelled Status Mismatch
                 if is_partial_tc or is_partial_oms:
-                    # Filter out Cancelled Sync Mismatch for this order
+                    # Filter out Cancelled Status Mismatch for this order
                     for d in discs:
-                        if d["Validation Result"] != "Cancelled Sync Mismatch":
+                        if d["Validation Result"] != "Cancelled Status Mismatch":
                             filtered_discrepancies.append(d)
                     continue
 
