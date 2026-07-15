@@ -155,9 +155,9 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
     # ── Title Block merged to match the pivot table width ──
     title_end_col = len(pivot_df.columns) if not pivot_df.empty else 6
     ws_summary.merge_cells(start_row=2, start_column=1, end_row=2, end_column=title_end_col)
-    ws_summary.row_dimensions[2].height = 40
+    ws_summary.row_dimensions[2].height = 24
     
-    title_cell = ws_summary.cell(row=2, column=1, value=f"🐾 PUMA {country} - Pending Orders")
+    title_cell = ws_summary.cell(row=2, column=1, value=f"PUMA {country} - Pending Orders")
     
     # Custom PUMA brand styling (PUMA Red background, white bold text)
     puma_red_fill = PatternFill(start_color="BA0C2F", end_color="BA0C2F", fill_type="solid")
@@ -172,19 +172,6 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
         cell_block = ws_summary.cell(row=2, column=col_idx)
         cell_block.fill = puma_red_fill
         cell_block.border = thin_border
-        
-    # Insert PUMA logo image into cell A2
-    _ensure_puma_logo_exists()
-    import os
-    if os.path.exists("puma_logo.png"):
-        try:
-            from openpyxl.drawing.image import Image
-            img = Image("puma_logo.png")
-            img.width = 80
-            img.height = 32
-            ws_summary.add_image(img, "A2")
-        except Exception:
-            pass
         
     # ── Pivot Table (Starting at A3 - no gap) ──
     if not pivot_df.empty:
