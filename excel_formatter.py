@@ -51,25 +51,78 @@ def get_date_status(date_str, ref_date_str):
     except Exception:
         return 'Unknown'
 
-def autofit_columns(ws, min_width=10, padding=3):
+def _ensure_puma_logo_exists():
+    import os
+    if not os.path.exists("puma_logo.png"):
+        try:
+            from PIL import Image as PILImage, ImageDraw
+            img = PILImage.new('RGBA', (200, 80), color=(255, 255, 255, 255))
+            draw = ImageDraw.Draw(img)
+            
+            # Arched body
+            points = [
+                (40, 45), (45, 40), (55, 30), (65, 25), (75, 22), (85, 22), 
+                (95, 25), (105, 30), (120, 42), (135, 50), (150, 52), (160, 50),
+                (150, 45), (135, 40), (120, 32), (105, 22), (95, 17), (80, 15),
+                (65, 17), (55, 22), (45, 30), (35, 40), (25, 50), (30, 52)
+            ]
+            draw.polygon(points, fill=(16, 16, 16, 255))
+            
+            # Legs & tail
+            draw.line([(55, 30), (35, 18)], fill=(16, 16, 16, 255), width=4)
+            draw.line([(50, 33), (32, 23)], fill=(16, 16, 16, 255), width=3)
+            draw.line([(135, 50), (155, 68)], fill=(16, 16, 16, 255), width=4)
+            draw.line([(142, 51), (165, 64)], fill=(16, 16, 16, 255), width=3)
+            draw.line([(150, 52), (180, 40), (190, 20)], fill=(16, 16, 16, 255), width=3)
+            
+            # Text PUMA
+            draw.rectangle([60, 58, 64, 73], fill=(16, 16, 16, 255))
+            draw.rectangle([60, 58, 72, 66], fill=(16, 16, 16, 255))
+            draw.rectangle([70, 60, 72, 64], fill=(16, 16, 16, 255))
+            
+            draw.rectangle([78, 58, 82, 70], fill=(16, 16, 16, 255))
+            draw.rectangle([88, 58, 92, 70], fill=(16, 16, 16, 255))
+            draw.rectangle([78, 70, 92, 73], fill=(16, 16, 16, 255))
+            
+            draw.rectangle([98, 58, 102, 73], fill=(16, 16, 16, 255))
+            draw.rectangle([112, 58, 116, 73], fill=(16, 16, 16, 255))
+            draw.polygon([(102, 58), (107, 68), (112, 58), (109, 58), (107, 64), (105, 58)], fill=(16, 16, 16, 255))
+            
+            draw.rectangle([122, 60, 126, 73], fill=(16, 16, 16, 255))
+            draw.rectangle([132, 60, 136, 73], fill=(16, 16, 16, 255))
+            draw.rectangle([122, 58, 136, 61], fill=(16, 16, 16, 255))
+            draw.rectangle([122, 66, 136, 68], fill=(16, 16, 16, 255))
+            
+            img.save("puma_logo.png")
+        except Exception:
+            pass
+
+def autofit_columns(ws, df=None, min_width=10, padding=3):
     """Auto-adjusts columns width according to cells content length."""
-    for col in ws.columns:
-        max_len = 0
-        col_letter = get_column_letter(col[0].column)
-        
-        # Determine maximum content length
-        for cell in col:
-            val = str(cell.value or '')
-            # Handle linebreaks or formatting extensions
-            if '\n' in val:
-                lines_len = [len(l) for l in val.split('\n')]
-                cell_len = max(lines_len) if lines_len else 0
-            else:
-                cell_len = len(val)
-            if cell_len > max_len:
-                max_len = cell_len
-                
-        ws.column_dimensions[col_letter].width = max(max_len + padding, min_width)
+    if df is not None and not df.empty:
+        # Optimized vectorized logic from DataFrame for fast execution
+        for col_idx, col_name in enumerate(df.columns, start=1):
+            col_letter = get_column_letter(col_idx)
+            max_len = int(df[col_name].astype(str).str.len().max())
+            header_len = len(str(col_name))
+            ws.column_dimensions[col_letter].width = max(max(max_len, header_len) + padding, min_width)
+    else:
+        # Fallback cell-scan optimized by slicing first 100 rows for summary sheets
+        for col in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            
+            for cell in col[:100]:
+                val = str(cell.value or '')
+                if '\n' in val:
+                    lines_len = [len(l) for l in val.split('\n')]
+                    cell_len = max(lines_len) if lines_len else 0
+                else:
+                    cell_len = len(val)
+                if cell_len > max_len:
+                    max_len = cell_len
+                    
+            ws.column_dimensions[col_letter].width = max(max_len + padding, min_width)
 
 def format_data_sheet(ws, df):
     """Applies basic styling, bold headers, thin borders, and center alignment to all data cells."""
@@ -90,7 +143,7 @@ def format_data_sheet(ws, df):
             cell.border = thin_border
             cell.alignment = Alignment(horizontal='center', vertical='center')
                 
-    autofit_columns(ws)
+    autofit_columns(ws, df)
 
 def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, ref_date_str):
     """
@@ -102,6 +155,7 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
     # ── Title Block merged to match the pivot table width ──
     title_end_col = len(pivot_df.columns) if not pivot_df.empty else 6
     ws_summary.merge_cells(start_row=2, start_column=1, end_row=2, end_column=title_end_col)
+    ws_summary.row_dimensions[2].height = 40
     
     title_cell = ws_summary.cell(row=2, column=1, value=f"🐾 PUMA {country} - Pending Orders")
     
@@ -118,6 +172,19 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
         cell_block = ws_summary.cell(row=2, column=col_idx)
         cell_block.fill = puma_red_fill
         cell_block.border = thin_border
+        
+    # Insert PUMA logo image into cell A2
+    _ensure_puma_logo_exists()
+    import os
+    if os.path.exists("puma_logo.png"):
+        try:
+            from openpyxl.drawing.image import Image
+            img = Image("puma_logo.png")
+            img.width = 80
+            img.height = 32
+            ws_summary.add_image(img, "A2")
+        except Exception:
+            pass
         
     # ── Pivot Table (Starting at A3 - no gap) ──
     if not pivot_df.empty:
