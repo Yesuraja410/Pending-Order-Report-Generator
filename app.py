@@ -43,29 +43,51 @@ with st.sidebar:
 
 # == Main Screen ===============================================================
 # Check if files are uploaded
+has_pending = order_pending is not None
 has_tc = (order_tc is not None) or (marketplace_reports is not None and len(marketplace_reports) > 0)
+has_oms = order_oms is not None
 
-if not (has_tc and order_oms):
-    st.info("Please upload at least the TC Order Report or Market Place Reports, and the OMS Report (Sales Order file) in the sidebar to get started.")
+is_valid_combo = False
+mode_desc = ""
+
+# 1. Mode 1: GSheet + OMS Report Alone
+if has_pending and has_oms and not has_tc:
+    is_valid_combo = True
+    mode_desc = "GSheet + OMS Validation Mode"
+# 2. Mode 2: TC Order Report + Marketplace Reports alone
+elif has_tc and not has_pending and not has_oms:
+    is_valid_combo = True
+    mode_desc = "TC + Marketplace Reconciliation Mode"
+# 3. Mode 3/4: TC/Marketplace + OMS (with or without GSheet)
+elif has_tc and has_oms:
+    is_valid_combo = True
+    if has_pending:
+        mode_desc = "Full Validation Mode (GSheet + TC + OMS)"
+    else:
+        mode_desc = "TC + OMS Validation Mode"
+
+if not is_valid_combo:
+    st.info(
+        "💡 **Please upload one of the following combinations to start validation:**\n\n"
+        "1. **GSheet + OMS Mode**: Upload GSheet Link (1) and OMS Report (4).\n"
+        "2. **TC + Marketplace Mode**: Upload TC Order Report (2) and Market Place Reports (3).\n"
+        "3. **TC + OMS Mode**: Upload TC Order Report (2) or Market Place Reports (3), and OMS Report (4) (optionally add GSheet Link for Full SLA Enrichment)."
+    )
 else:
     # Display active mode banner
-    if order_pending:
-        st.success("🎯 **Full Validation Mode (GSheet SLA)**: Pending Order Report, TC/Marketplace Reports, and OMS Report are ready for processing.")
-    else:
-        st.success("🎯 **Validation Mode (TC Pending)**: Pending orders will be extracted from TC/Marketplace reports and reconciled against OMS Report.")
+    st.success(f"🎯 **Active Mode: {mode_desc}**")
 
     # Trigger validation either by clicking sidebar button or main screen button
     if run_btn or st.button("Run Validation & Analysis", type="primary", use_container_width=True):
         with st.spinner("Processing reports and running validations..."):
             try:
-                # Combine TC Order Report and Market Place Reports into one list
-                tc_files_list = []
-                if order_tc is not None:
-                    tc_files_list.append(order_tc)
-                if marketplace_reports:
-                    tc_files_list.extend(marketplace_reports)
-                
-                res = process_and_validate_orders(order_pending, tc_files_list, order_oms, None)
+                res = process_and_validate_orders(
+                    pending_file=order_pending,
+                    tc_file=order_tc,
+                    marketplace_file=marketplace_reports,
+                    oms_file=order_oms,
+                    contacts_file=None
+                )
                 st.session_state["order_enriched_df"] = res["enriched_pending_df"]
                 st.session_state["order_disc_df"] = res["discrepancies_df"]
                 st.session_state["order_summary"] = res["summary"]
@@ -87,10 +109,21 @@ else:
         country_reports = st.session_state.get("order_country_reports", {})
         
         has_pending = not enriched_df.empty
+        is_reconciliation_mode = "all_imported_to_tc" in summary
 
         # Display metrics
         st.markdown("### Key Metrics")
-        if has_pending:
+        if is_reconciliation_mode:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Marketplace Orders", summary["total_pending_orders"])
+            m2.metric("Reflected in TC", summary["pushed_count"])
+            m3.metric("Missing from TC", summary["not_pushed_count"])
+            
+            if summary["all_imported_to_tc"]:
+                st.success("🎉 **All Marketplace orders are successfully imported to TC!**")
+            else:
+                st.error(f"⚠️ **Found {summary['not_pushed_count']} orders missing from TC!**")
+        elif has_pending:
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total Pending Orders", summary["total_pending_orders"])
             m2.metric("Successfully Pushed", summary["pushed_count"])
