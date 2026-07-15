@@ -161,7 +161,7 @@ def _find_column(df, candidates):
 def _is_blank(val):
     """Check if a value is null, empty string, or nan/nat strings produced by Excel loading."""
     s = str(val).strip().replace('\r', '').replace('\n', '')
-    return not s or s.lower() in ("nan", "none", "nat", "null", "undefined", "nat")
+    return not s or s.lower() in ("nan", "none", "nat", "null", "undefined", "nat", "#n/a")
 
 def normalize_ean(val):
     if pd.isna(val):
@@ -178,7 +178,9 @@ def normalize_ean(val):
     return s
 
 def extract_date(val):
-    """Extract a YYYY-MM-DD date from various timestamp formats."""
+    """Extract a YYYY-MM-DD date from various timestamp formats. Returns #N/A if blank."""
+    if _is_blank(val):
+        return "#N/A"
     s = str(val).strip()
     if len(s) >= 10:
         if '-' in s:
@@ -195,7 +197,7 @@ def extract_date(val):
                     return f"{parts[2]}-{parts[1]}-{parts[0]}"
                 else:
                     return f"{parts[0]}-{parts[1]}-{parts[2]}"
-    return s
+    return s if s else "#N/A"
 
 def load_file_safely(file):
     """Load uploaded file object (CSV or Excel) into a DataFrame. Scans sheets if Excel."""
@@ -503,7 +505,7 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     
     # Check what status column GSheet has for orders
     pend_status_col = _find_column(df_pending, ["order_status", "status", "Item Status", "orderItems.orderStatus", "TC Status"])
-    pend_sku_col = _find_column(df_pending, ["custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
+    pend_sku_col = _find_column(df_pending, ["seller_sku", "sellerSku", "Seller SKU", "SellerSKU", "custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
 
     for idx, row in df_pending.iterrows():
         order_id = row[pend_id_col]
@@ -660,11 +662,14 @@ def run_gsheet_oms_validation(df_pending, df_oms):
 
     # Format SLA Date column
     if target_sla_col in df_pending.columns:
+        df_pending[target_sla_col] = df_pending[target_sla_col].fillna("#N/A")
         df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
 
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
-        "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+        "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
+    if not df_discrepancies.empty and "SKU" in df_discrepancies.columns:
+        df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
 
     # Seller grouping
     seller_groups = {}
@@ -846,8 +851,10 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             })
 
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
-        "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+        "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
+    if not df_discrepancies.empty and "SKU" in df_discrepancies.columns:
+        df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
 
     # Seller grouping
     seller_groups = {}
@@ -896,6 +903,11 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
                 fill_value=0
             )
             pivot_df.index.names = ["Channel", "OMS Order Status"]
+            
+            # Drop columns representing blank/invalid SLA dates (including nan, nat, #N/A)
+            cols_to_drop_pivot = [col for col in pivot_df.columns if str(col).lower().strip() in ("nan", "none", "nat", "null", "#n/a", "")]
+            pivot_df = pivot_df.drop(columns=cols_to_drop_pivot, errors="ignore")
+            
             new_cols = []
             for col in pivot_df.columns:
                 try:
@@ -1193,7 +1205,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     if tc_item_status_col:
         tc_item_status_map = df_tc.set_index(tc_id_col)[tc_item_status_col].dropna().to_dict()
 
-    tc_custom_sku_col = _find_column(df_tc, ["custom_sku", "customSku", "custom_SKU", "sku"])
+    tc_custom_sku_col = _find_column(df_tc, ["seller_sku", "sellerSku", "Seller SKU", "SellerSKU", "custom_sku", "customSku", "custom_SKU", "sku"])
     tc_sku_map = {}
     if tc_custom_sku_col:
         tc_sku_map = df_tc.set_index(tc_id_col)[tc_custom_sku_col].dropna().to_dict()
@@ -1266,7 +1278,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             ref_date = temp_ref_date
 
         # Ensure sla_status column exists in df_pending
-        pend_sku_col = _find_column(df_pending, ["custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
+        pend_sku_col = _find_column(df_pending, ["seller_sku", "sellerSku", "Seller SKU", "SellerSKU", "custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
         for idx, row in df_pending.iterrows():
             order_id = row[pend_id_col]
             sla_val = row[target_sla_col]
@@ -1282,6 +1294,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     df_pending.at[idx, "SLA Source"] = "Enriched from TC"
                     enriched_sla_count += 1
                 else:
+                    df_pending.at[idx, target_sla_col] = "#N/A"
                     df_pending.at[idx, "SLA Source"] = "Missing (Not in TC)"
                     blank_sla_not_found += 1
             else:
@@ -1392,6 +1405,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
 
         # Format SLA Date column to show only Date (no Time) in output report
         if target_sla_col in df_pending.columns:
+            df_pending[target_sla_col] = df_pending[target_sla_col].fillna("#N/A")
             df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
 
     # == 4. Status Discrepancy Validations ====================================
@@ -1626,8 +1640,10 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     filtered_discrepancies.extend(missing_tc_discrepancies)
 
     df_discrepancies = pd.DataFrame(filtered_discrepancies) if filtered_discrepancies else pd.DataFrame(columns=[
-        "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+        "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
+    if not df_discrepancies.empty and "SKU" in df_discrepancies.columns:
+        df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
 
     # == 5. Seller Contact Map & Grouping =====================================
     seller_groups = {}
@@ -1709,6 +1725,10 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     aggfunc="count",
                     fill_value=0
                 )
+                
+                # Drop columns representing blank/invalid SLA dates (including nan, nat, #N/A)
+                cols_to_drop_pivot = [col for col in pivot_df.columns if str(col).lower().strip() in ("nan", "none", "nat", "null", "#n/a", "")]
+                pivot_df = pivot_df.drop(columns=cols_to_drop_pivot, errors="ignore")
                 
                 # Format columns of Pivot Table as DD-MM-YYYY
                 new_cols = []
