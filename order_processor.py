@@ -380,40 +380,434 @@ def fetch_pending_from_mcp():
     except Exception as e:
         raise ValueError(f"Failed to fetch pending orders from DB: {str(e)}")
 
-def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=None):
-    """
-    Process Pending Order Report (SLA file), TC Report (All file), and OMS Report (Sales Order file).
-    """
-    # == 1. Load DataFrames ====================================================
-    # Load TC file(s) - supports single or multiple uploaded files
-    if isinstance(tc_file, list):
-        tc_dfs = []
-        for f in tc_file:
-            sub_df = load_file_safely(f)
-            if not sub_df.empty:
-                tc_dfs.append(sub_df)
-        df_tc = pd.concat(tc_dfs, ignore_index=True) if tc_dfs else pd.DataFrame()
-    else:
-        df_tc = load_file_safely(tc_file)
+def run_gsheet_oms_validation(df_pending, df_oms):
+    # Find ID and nickname/store column in Pending Order Report
+    pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
+    pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    
+    if not pend_id_col:
+        raise KeyError(f"Could not find 'Order ID' column in Pending Order Report. Available: {list(df_pending.columns)}")
+    df_pending[pend_id_col] = df_pending[pend_id_col].apply(_clean_order_id)
+    
+    target_sla_col = pend_sla_col if pend_sla_col else "SLA"
+    if target_sla_col not in df_pending.columns:
+        df_pending[target_sla_col] = ""
+        
+    target_store_col = pend_store_col if pend_store_col else "Store Name"
+    if target_store_col not in df_pending.columns:
+        df_pending[target_store_col] = "Default Store"
+        
+    # Clean store column to remove PUMA_ prefix case-insensitively
+    df_pending[target_store_col] = df_pending[target_store_col].apply(
+        lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
+    )
 
-    # Load OMS file(s) - supports single or multiple uploaded files
-    if isinstance(oms_file, list):
-        oms_dfs = []
-        for f in oms_file:
-            sub_df = load_file_safely(f)
-            if not sub_df.empty:
-                oms_dfs.append(sub_df)
-        df_oms = pd.concat(oms_dfs, ignore_index=True) if oms_dfs else pd.DataFrame()
-    else:
-        df_oms = load_file_safely(oms_file)
+    # OMS Report columns (Sales Order file)
+    oms_id_col = _find_column(df_oms, ["order_no", "order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    oms_status_col = _find_column(df_oms, ["order_status", "OMS Status", "Order Status", "Status", "OMS_Status"])
+    
+    if not oms_id_col:
+        raise KeyError(f"Could not find 'Order ID' column in OMS Report. Available: {list(df_oms.columns)}")
+    df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
 
-    df_contacts = load_file_safely(contacts_file) if contacts_file is not None else pd.DataFrame()
+    oms_status_map = df_oms.set_index(oms_id_col)[oms_status_col].dropna().to_dict() if oms_status_col else {}
 
-    if df_tc.empty:
-        raise ValueError("Marketplace Order Reports (TC Reports) are empty or could not be loaded.")
-    if df_oms.empty:
-        raise ValueError("OMS Report (Sales Order file) is empty or could not be loaded.")
+    df_pending["OMS Order Status"] = ""
+    df_pending["Final Remarks"] = ""
+    df_pending["Correct Order Number"] = df_pending[pend_id_col]
+    df_pending["SLA Source"] = "Pending Report"
+    
+    if "sla_status" not in df_pending.columns:
+        df_pending["sla_status"] = ""
+        
+    # Determine reference date
+    ref_date = datetime.today().strftime('%Y-%m-%d')
+    temp_ref_date = None
+    if "sla_status" in df_pending.columns:
+        today_rows = df_pending[df_pending["sla_status"].astype(str).str.strip().str.lower() == "today"]
+        if not today_rows.empty:
+            for val in today_rows[target_sla_col]:
+                if not _is_blank(val):
+                    p_dt = extract_date(val)
+                    if len(p_dt) == 10:
+                        temp_ref_date = p_dt
+                        break
+    if not temp_ref_date and target_sla_col in df_pending.columns:
+        for val in df_pending[target_sla_col]:
+            if not _is_blank(val):
+                p_dt = extract_date(val)
+                if len(p_dt) == 10:
+                    temp_ref_date = p_dt
+                    break
+    if temp_ref_date:
+        ref_date = temp_ref_date
 
+    # Compute sla status
+    for idx, row in df_pending.iterrows():
+        sla_val = row[target_sla_col]
+        sla_status_val = row.get("sla_status", "")
+        if _is_blank(sla_status_val):
+            curr_sla = df_pending.at[idx, target_sla_col]
+            calculated_status = compute_sla_status(curr_sla, ref_date)
+            if calculated_status:
+                df_pending.at[idx, "sla_status"] = calculated_status
+
+    discrepancies = []
+    pushed_count = 0
+    not_pushed_count = 0
+    
+    # Check what status column GSheet has for orders
+    pend_status_col = _find_column(df_pending, ["order_status", "status", "Item Status", "orderItems.orderStatus", "TC Status"])
+
+    for idx, row in df_pending.iterrows():
+        order_id = row[pend_id_col]
+        order_id_str = str(order_id).strip()
+        store_val = _clean_str(row.get(target_store_col, ""))
+        
+        if order_id_str in oms_status_map:
+            oms_stat = oms_status_map[order_id_str]
+            df_pending.at[idx, "OMS Order Status"] = oms_stat
+            df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
+            pushed_count += 1
+            
+            # Check for status mismatch if GSheet has a status
+            if pend_status_col:
+                pend_stat = _clean_str(row.get(pend_status_col, ""))
+                if pend_stat:
+                    # Normalize for mismatch check
+                    pend_norm = _normalize_status_val(pend_stat)
+                    oms_norm = _normalize_status_val(oms_stat)
+                    
+                    if pend_norm != oms_norm:
+                        if not (oms_norm == "shipped" and pend_norm in ("completed", "shipped", "paid")):
+                            discrepancies.append({
+                                "Order ID": order_id_str,
+                                "Nickname": store_val,
+                                "SKU": "",
+                                "Validation Result": "Status Mismatch",
+                                "TC Order Status": pend_stat,
+                                "TC Item Status": pend_stat,
+                                "OMS Order Status": oms_stat,
+                                "OMS Line Status": oms_stat,
+                                "Details": f"Status mismatch: GSheet pending status is '{pend_stat}', but OMS status is '{oms_stat}'."
+                            })
+        else:
+            df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+            df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+            not_pushed_count += 1
+            
+            discrepancies.append({
+                "Order ID": order_id_str,
+                "Nickname": store_val,
+                "SKU": "",
+                "Validation Result": "Not Pushed to OMS",
+                "TC Order Status": "N/A",
+                "TC Item Status": "N/A",
+                "OMS Order Status": "Not in OMS",
+                "OMS Line Status": "Not in OMS",
+                "Details": "Order ID is present in Pending SLA report but missing from OMS Report."
+            })
+
+    # Format SLA Date column
+    if target_sla_col in df_pending.columns:
+        df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
+
+    df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
+        "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+    ])
+
+    # Seller grouping
+    seller_groups = {}
+    stores = df_pending[target_store_col].unique()
+    for store in stores:
+        store_clean = _clean_str(store)
+        store_df = df_pending[df_pending[target_store_col] == store].copy()
+        store_df["Seller Email"] = ""
+        seller_groups[store_clean] = {
+            "df": store_df,
+            "email": ""
+        }
+
+    # Country-specific reports
+    country_reports = {}
+    for country in ["SG", "MY", "PH"]:
+        country_reports[country] = {
+            "raw_df": pd.DataFrame(),
+            "pivot_df": pd.DataFrame(),
+            "summary_df": pd.DataFrame()
+        }
+
+    df_pending["Order Date"] = df_pending[target_sla_col].apply(extract_date) if target_sla_col in df_pending.columns else "Unknown"
+
+    for country in ["SG", "MY", "PH"]:
+        c_rows = []
+        for idx, row in df_pending.iterrows():
+            store_val = _clean_str(row[target_store_col])
+            c_code, chan = parse_country_and_channel(store_val)
+            if c_code == country:
+                final_rem = _clean_str(row.get("Final Remarks", ""))
+                oms_stat = _clean_str(row.get("OMS Order Status", ""))
+                if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
+                    continue
+                row_dict = row.to_dict()
+                row_dict["Country"] = country
+                row_dict["Channel"] = f"{chan} {country}"
+                c_rows.append(row_dict)
+                
+        country_df = pd.DataFrame(c_rows)
+        if not country_df.empty:
+            pivot_df = country_df.pivot_table(
+                index=["Channel", "OMS Order Status"],
+                columns="Order Date",
+                values="Correct Order Number",
+                aggfunc="count",
+                fill_value=0
+            )
+            new_cols = []
+            for col in pivot_df.columns:
+                try:
+                    dt = pd.to_datetime(col)
+                    new_cols.append(dt.strftime('%d-%m-%Y'))
+                except Exception:
+                    new_cols.append(col)
+            pivot_df.columns = new_cols
+            pivot_df["Grand Total"] = pivot_df.sum(axis=1)
+            pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
+            pivot_df = pivot_df.reset_index()
+
+            summary_metrics = [
+                {"Metric": "Overdue (SLA breached)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "breached").sum()) if "sla_status" in country_df else 0},
+                {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum()) if "sla_status" in country_df else 0},
+                {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
+                {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum()) if "sla_status" in country_df else 0},
+                {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())}
+            ]
+            summary_df = pd.DataFrame(summary_metrics)
+            
+            cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel"]
+            country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
+            
+            country_reports[country] = {
+                "raw_df": country_df_export,
+                "pivot_df": pivot_df,
+                "summary_df": summary_df
+            }
+
+    ref_date_dmy = ""
+    try:
+        ref_dt = datetime.strptime(ref_date, "%Y-%m-%d")
+        ref_date_dmy = ref_dt.strftime("%d-%m-%Y")
+    except Exception:
+        ref_date_dmy = ref_date
+
+    summary = {
+        "total_pending_orders": len(df_pending),
+        "enriched_sla_count": 0,
+        "blank_sla_not_found": 0,
+        "total_discrepancies": len(df_discrepancies),
+        "cancelled_mismatches": 0,
+        "packed_mismatches": 0,
+        "pushed_count": pushed_count,
+        "not_pushed_count": not_pushed_count,
+        "unpaid_count": 0,
+        "total_sellers": len(seller_groups)
+    }
+
+    return {
+        "enriched_pending_df": df_pending,
+        "discrepancies_df": df_discrepancies,
+        "summary": summary,
+        "seller_groups": seller_groups,
+        "pending_order_id_col": target_sla_col,
+        "country_reports": country_reports,
+        "ref_date_dmy": ref_date_dmy
+    }
+
+def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
+    # Find ID and nickname/store column in both Reports
+    tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    mp_id_col = _find_column(df_marketplace, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    mp_store_col = _find_column(df_marketplace, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    mp_sku_col = _find_column(df_marketplace, ["custom_sku", "customSku", "sku", "item_sku", "SKU"])
+
+    if not tc_id_col:
+        raise KeyError(f"Could not find 'Order ID' column in TC Order Report. Available: {list(df_tc.columns)}")
+    if not mp_id_col:
+        raise KeyError(f"Could not find 'Order ID' column in Market Place Reports. Available: {list(df_marketplace.columns)}")
+
+    df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
+    df_marketplace[mp_id_col] = df_marketplace[mp_id_col].apply(_clean_order_id)
+
+    tc_ids = set(df_tc[tc_id_col].dropna().astype(str).str.strip().tolist())
+
+    df_marketplace["Final Remarks"] = ""
+    df_marketplace["OMS Order Status"] = "N/A"
+    df_marketplace["Correct Order Number"] = df_marketplace[mp_id_col]
+    df_marketplace["SLA Source"] = "Marketplace Report"
+    df_marketplace["SLA"] = ""
+    
+    if "sla_status" not in df_marketplace.columns:
+        df_marketplace["sla_status"] = ""
+
+    target_store_col = mp_store_col if mp_store_col else "Store Name"
+    if target_store_col not in df_marketplace.columns:
+        df_marketplace[target_store_col] = "Default Store"
+
+    # Clean store column to remove PUMA_ prefix case-insensitively
+    df_marketplace[target_store_col] = df_marketplace[target_store_col].apply(
+        lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
+    )
+
+    discrepancies = []
+    reflected_count = 0
+    missing_count = 0
+
+    for idx, row in df_marketplace.iterrows():
+        order_id = row[mp_id_col]
+        order_id_str = str(order_id).strip()
+        store_val = _clean_str(row.get(target_store_col, ""))
+        sku_val = _clean_str(row.get(mp_sku_col, "")) if mp_sku_col else ""
+        
+        if order_id_str in tc_ids:
+            df_marketplace.at[idx, "Final Remarks"] = "Imported to TC"
+            reflected_count += 1
+        else:
+            df_marketplace.at[idx, "Final Remarks"] = "Order missing in TC"
+            missing_count += 1
+            
+            discrepancies.append({
+                "Order ID": order_id_str,
+                "Nickname": store_val,
+                "SKU": sku_val,
+                "Validation Result": "Order missing in TC",
+                "TC Order Status": "Missing",
+                "TC Item Status": "Missing",
+                "OMS Order Status": "N/A",
+                "OMS Line Status": "N/A",
+                "Details": "Order is present in Marketplace reports but completely missing from TC Order Report."
+            })
+
+    df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
+        "Order ID", "Nickname", "SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+    ])
+
+    # Seller grouping
+    seller_groups = {}
+    stores = df_marketplace[target_store_col].unique()
+    for store in stores:
+        store_clean = _clean_str(store)
+        store_df = df_marketplace[df_marketplace[target_store_col] == store].copy()
+        store_df["Seller Email"] = ""
+        seller_groups[store_clean] = {
+            "df": store_df,
+            "email": ""
+        }
+
+    # Country-specific reports
+    country_reports = {}
+    for country in ["SG", "MY", "PH"]:
+        country_reports[country] = {
+            "raw_df": pd.DataFrame(),
+            "pivot_df": pd.DataFrame(),
+            "summary_df": pd.DataFrame()
+        }
+
+    df_marketplace["Order Date"] = "Unknown"
+    mp_date_col = _find_column(df_marketplace, ["date", "created", "order_date", "Order Date", "timeOrderCreated"])
+    if mp_date_col:
+        df_marketplace["Order Date"] = df_marketplace[mp_date_col].apply(extract_date)
+
+    for country in ["SG", "MY", "PH"]:
+        c_rows = []
+        for idx, row in df_marketplace.iterrows():
+            store_val = _clean_str(row[target_store_col])
+            c_code, chan = parse_country_and_channel(store_val)
+            if c_code == country:
+                row_dict = row.to_dict()
+                row_dict["Country"] = country
+                row_dict["Channel"] = f"{chan} {country}"
+                c_rows.append(row_dict)
+                
+        country_df = pd.DataFrame(c_rows)
+        if not country_df.empty:
+            pivot_df = country_df.pivot_table(
+                index=["Channel", "Final Remarks"],
+                columns="Order Date",
+                values="Correct Order Number",
+                aggfunc="count",
+                fill_value=0
+            )
+            pivot_df.index.names = ["Channel", "OMS Order Status"]
+            new_cols = []
+            for col in pivot_df.columns:
+                try:
+                    dt = pd.to_datetime(col)
+                    new_cols.append(dt.strftime('%d-%m-%Y'))
+                except Exception:
+                    new_cols.append(col)
+            pivot_df.columns = new_cols
+            pivot_df["Grand Total"] = pivot_df.sum(axis=1)
+            pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
+            pivot_df = pivot_df.reset_index()
+
+            summary_metrics = [
+                {"Metric": "Reflected in TC", "Count": int((country_df["Final Remarks"] == "Imported to TC").sum())},
+                {"Metric": "Missing from TC", "Count": int((country_df["Final Remarks"] == "Order missing in TC").sum())},
+                {"Metric": "Order Status at New", "Count": 0},
+                {"Metric": "Within SLA (Future)", "Count": 0},
+                {"Metric": "Not reflecting in OM", "Count": 0}
+            ]
+            summary_df = pd.DataFrame(summary_metrics)
+            
+            cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel"]
+            country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
+            
+            country_reports[country] = {
+                "raw_df": country_df_export,
+                "pivot_df": pivot_df,
+                "summary_df": summary_df
+            }
+
+    ref_date_str = datetime.today().strftime('%d-%m-%Y')
+    summary = {
+        "total_pending_orders": len(df_marketplace),
+        "enriched_sla_count": 0,
+        "blank_sla_not_found": 0,
+        "total_discrepancies": len(df_discrepancies),
+        "cancelled_mismatches": 0,
+        "packed_mismatches": 0,
+        "pushed_count": reflected_count,
+        "not_pushed_count": missing_count,
+        "unpaid_count": 0,
+        "total_sellers": len(seller_groups),
+        "all_imported_to_tc": (len(df_discrepancies) == 0)
+    }
+
+    return {
+        "enriched_pending_df": df_marketplace,
+        "discrepancies_df": df_discrepancies,
+        "summary": summary,
+        "seller_groups": seller_groups,
+        "pending_order_id_col": mp_id_col,
+        "country_reports": country_reports,
+        "ref_date_dmy": ref_date_str
+    }
+
+def process_and_validate_orders(pending_file, tc_file, marketplace_file=None, oms_file=None, contacts_file=None):
+    # Backwards compatibility: if only 3 arguments are passed, marketplace_file holds the oms_file value
+    if oms_file is None and marketplace_file is not None:
+        # If we have only 3 arguments, the third one is oms_file
+        oms_file = marketplace_file
+        marketplace_file = None
+
+    # Load all dataframes
+    df_pending = pd.DataFrame()
+    df_tc = pd.DataFrame()
+    df_marketplace = pd.DataFrame()
+    df_oms = pd.DataFrame()
+    
+    # Load Pending Report
     if isinstance(pending_file, str) and pending_file == "mcp":
         df_pending = fetch_pending_from_mcp()
     elif pending_file is not None:
@@ -423,8 +817,69 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
             if isinstance(pending_file, str) and (pending_file.startswith("http://") or pending_file.startswith("https://")):
                 pending_file = download_google_sheet(pending_file)
             df_pending = load_file_safely(pending_file)
+            
+    # Load TC Report
+    if isinstance(tc_file, list):
+        tc_dfs = []
+        for f in tc_file:
+            sub_df = load_file_safely(f)
+            if not sub_df.empty:
+                tc_dfs.append(sub_df)
+        df_tc = pd.concat(tc_dfs, ignore_index=True) if tc_dfs else pd.DataFrame()
+    elif tc_file is not None:
+        df_tc = load_file_safely(tc_file)
+        
+    # Load Marketplace Reports
+    if isinstance(marketplace_file, list):
+        mp_dfs = []
+        for f in marketplace_file:
+            sub_df = load_file_safely(f)
+            if not sub_df.empty:
+                mp_dfs.append(sub_df)
+        df_marketplace = pd.concat(mp_dfs, ignore_index=True) if mp_dfs else pd.DataFrame()
+    elif marketplace_file is not None:
+        df_marketplace = load_file_safely(marketplace_file)
+        
+    # Load OMS Report
+    if isinstance(oms_file, list):
+        oms_dfs = []
+        for f in oms_file:
+            sub_df = load_file_safely(f)
+            if not sub_df.empty:
+                oms_dfs.append(sub_df)
+        df_oms = pd.concat(oms_dfs, ignore_index=True) if oms_dfs else pd.DataFrame()
+    elif oms_file is not None:
+        df_oms = load_file_safely(oms_file)
+        
+    df_contacts = load_file_safely(contacts_file) if contacts_file is not None else pd.DataFrame()
+
+    has_pending = not df_pending.empty
+    has_tc = not df_tc.empty
+    has_marketplace = not df_marketplace.empty
+    has_oms = not df_oms.empty
+
+    # Mode 2: TC Order Report + Marketplace Reports alone
+    if (has_tc or has_marketplace) and not has_pending and not has_oms:
+        return run_tc_marketplace_reconciliation(df_tc, df_marketplace)
+        
+    # Mode 1: GSheet + OMS Report Alone
+    elif has_pending and has_oms and not has_tc and not has_marketplace:
+        return run_gsheet_oms_validation(df_pending, df_oms)
+        
+    # Default Mode 3/4: standard validation with combined TC + Marketplace reports
     else:
-        df_pending = pd.DataFrame()
+        combined_tc_dfs = []
+        if not df_tc.empty:
+            combined_tc_dfs.append(df_tc)
+        if not df_marketplace.empty:
+            combined_tc_dfs.append(df_marketplace)
+            
+        if combined_tc_dfs:
+            df_tc = pd.concat(combined_tc_dfs, ignore_index=True)
+            
+        return run_standard_validation(df_pending, df_tc, df_oms, df_contacts)
+
+def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
 
     # If the g sheet / pending file is not uploaded, generate df_pending from TC Report
     # pending orders from TC with status of NEW, READY TO SHIP & ACCEPTED/PICKED
@@ -696,12 +1151,23 @@ def process_and_validate_orders(pending_file, tc_file, oms_file, contacts_file=N
                     if is_pending and not is_cod:
                         df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
                         unpaid_count += 1
-                    elif (is_pending and is_cod) or is_completed or not pay_status:
-                        df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-                        not_pushed_count += 1
                     else:
                         df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
                         not_pushed_count += 1
+                        
+                        # Add to discrepancies
+                        store_val = _clean_str(row.get(target_store_col, ""))
+                        missing_tc_discrepancies.append({
+                            "Order ID": order_id_str,
+                            "Nickname": store_val,
+                            "SKU": "",
+                            "Validation Result": "Not Pushed to OMS",
+                            "TC Order Status": pay_status if pay_status else "Paid/COD",
+                            "TC Item Status": pay_status if pay_status else "Paid/COD",
+                            "OMS Order Status": "Not in OMS",
+                            "OMS Line Status": "Not in OMS",
+                            "Details": "Paid or COD order is present in TC but missing from OMS Report."
+                        })
 
         # Format SLA Date column to show only Date (no Time) in output report
         if target_sla_col in df_pending.columns:
