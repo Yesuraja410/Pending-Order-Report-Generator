@@ -77,8 +77,8 @@ else:
     # Display active mode banner
     st.success(f"🎯 **Active Mode: {mode_desc}**")
 
-    # Trigger validation either by clicking sidebar button or main screen button
-    if run_btn or st.button("Run Validation & Analysis", type="primary", use_container_width=True):
+    # Trigger validation by clicking sidebar button
+    if run_btn:
         with st.spinner("Processing reports and running validations..."):
             try:
                 res = process_and_validate_orders(
@@ -174,13 +174,14 @@ else:
             
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                # Sheet 1: SLA Report
-                enriched_df.to_excel(writer, sheet_name="SLA Report", index=False)
+                # Sheet 1: SLA Report (dropping Correct Order Number and SLA Source as requested)
+                export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                export_enriched_df.to_excel(writer, sheet_name="SLA Report", index=False)
                 # Sheet 2: Status Discrepancies
                 disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
                 
                 # Format using excel_formatter
-                excel_formatter.format_data_sheet(writer.sheets["SLA Report"], enriched_df)
+                excel_formatter.format_data_sheet(writer.sheets["SLA Report"], export_enriched_df)
                 excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
                 
                 # Country-specific styled Summary and Data sheets
@@ -251,7 +252,8 @@ else:
             
             with sub_tab1:
                 st.markdown("#### Enriched SLA Report (Main Sheet)")
-                st.dataframe(enriched_df, use_container_width=True, hide_index=True)
+                display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                st.dataframe(display_enriched, use_container_width=True, hide_index=True)
                 
             with sub_tab2:
                 st.markdown("#### Validation Failures & Status Discrepancies (Separate Sheet)")
