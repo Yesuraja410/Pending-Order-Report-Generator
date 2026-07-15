@@ -247,7 +247,20 @@ def load_file_safely(file):
                 raw = file.read()
                 xl = pd.ExcelFile(io.BytesIO(raw))
                 
-            for sheet in xl.sheet_names:
+            # Optimized fallback: try first sheet first (99% of cases contain data in sheet 1)
+            if xl.sheet_names:
+                first_sheet = xl.sheet_names[0]
+                try:
+                    df = xl.parse(first_sheet, dtype=str)
+                    if df is not None and not df.empty:
+                        df_clean = df.dropna(how="all").reset_index(drop=True)
+                        if not df_clean.empty:
+                            return df_clean
+                except Exception:
+                    pass
+                    
+            # Loop fallback for secondary sheets
+            for sheet in xl.sheet_names[1:]:
                 try:
                     df = xl.parse(sheet, dtype=str)
                     if df is not None and not df.empty:
@@ -257,7 +270,7 @@ def load_file_safely(file):
                 except Exception:
                     continue
             
-            # Fallback: if all sheets are empty, return the first sheet
+            # Final fallback
             if xl.sheet_names:
                 return xl.parse(xl.sheet_names[0], dtype=str)
             return pd.DataFrame()
@@ -400,6 +413,14 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
     pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
     
+    is_tiktok_ph = lambda x: str(x).strip().lower().replace(" ", "").replace("-", "").replace("_", "") == "tiktokph"
+    if pend_store_col and pend_store_col in df_pending.columns:
+        df_pending = df_pending[~df_pending[pend_store_col].apply(is_tiktok_ph)].copy()
+        
+    oms_store_col = _find_column(df_oms, ["store", "nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    if oms_store_col and oms_store_col in df_oms.columns:
+        df_oms = df_oms[~df_oms[oms_store_col].apply(is_tiktok_ph)].copy()
+
     if not pend_id_col:
         raise KeyError(f"Could not find 'Order ID' column in Pending Order Report. Available: {list(df_pending.columns)}")
     df_pending[pend_id_col] = df_pending[pend_id_col].apply(_clean_order_id)
@@ -630,8 +651,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                     "Nickname": store_val,
                     "SKU": sku_val,
                     "Validation Result": "Not Pushed to OMS",
-                    "TC Order Status": "N/A",
-                    "TC Item Status": "N/A",
+                    "TC Order Status": pend_stat_raw if pend_status_col else "N/A",
+                    "TC Item Status": pend_stat_raw if pend_status_col else "N/A",
                     "OMS Order Status": "Not in OMS",
                     "OMS Line Status": "Not in OMS",
                     "Details": "Order ID is present in Pending SLA report but missing from OMS Report."
@@ -763,6 +784,14 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
         raise KeyError(f"Could not find 'Order ID' column in TC Order Report. Available: {list(df_tc.columns)}")
     if not mp_id_col:
         raise KeyError(f"Could not find 'Order ID' column in Market Place Reports. Available: {list(df_marketplace.columns)}")
+
+    is_tiktok_ph = lambda x: str(x).strip().lower().replace(" ", "").replace("-", "").replace("_", "") == "tiktokph"
+    if mp_store_col and mp_store_col in df_marketplace.columns:
+        df_marketplace = df_marketplace[~df_marketplace[mp_store_col].apply(is_tiktok_ph)].copy()
+        
+    tc_store_col = _find_column(df_tc, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    if tc_store_col and tc_store_col in df_tc.columns:
+        df_tc = df_tc[~df_tc[tc_store_col].apply(is_tiktok_ph)].copy()
 
     df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
     df_marketplace[mp_id_col] = df_marketplace[mp_id_col].apply(_clean_order_id)
@@ -1070,8 +1099,19 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     if has_pending:
         pend_store_col = _find_column(df_pending, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
         if pend_store_col and pend_store_col in df_pending.columns:
-            # Filter out TikTok PH orders
-            df_pending = df_pending[df_pending[pend_store_col].astype(str).str.strip().str.lower() != 'tiktok-ph'].copy()
+            # Filter out TikTok PH orders case-insensitively
+            is_tiktok_ph = lambda x: str(x).strip().lower().replace(" ", "").replace("-", "").replace("_", "") == "tiktokph"
+            df_pending = df_pending[~df_pending[pend_store_col].apply(is_tiktok_ph)].copy()
+            
+            # Filter df_tc if store column is present
+            tc_store_col = _find_column(df_tc, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+            if tc_store_col and tc_store_col in df_tc.columns:
+                df_tc = df_tc[~df_tc[tc_store_col].apply(is_tiktok_ph)].copy()
+                
+            # Filter df_oms if store column is present
+            oms_store_col = _find_column(df_oms, ["store", "nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+            if oms_store_col and oms_store_col in df_oms.columns:
+                df_oms = df_oms[~df_oms[oms_store_col].apply(is_tiktok_ph)].copy()
 
         if df_pending.empty:
             raise ValueError("Pending Order Report (SLA Report) has no rows after filtering out TikTok PH.")
@@ -1143,6 +1183,21 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     if tc_pay_method_col:
         tc_payment_method = df_tc.set_index(tc_id_col)[tc_pay_method_col].dropna().to_dict()
 
+    # Build maps for original statuses and SKUs from TC to show in Status Discrepancies sheet
+    tc_order_status_map = {}
+    if tc_status_col:
+        tc_order_status_map = df_tc.set_index(tc_id_col)[tc_status_col].dropna().to_dict()
+
+    tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
+    tc_item_status_map = {}
+    if tc_item_status_col:
+        tc_item_status_map = df_tc.set_index(tc_id_col)[tc_item_status_col].dropna().to_dict()
+
+    tc_custom_sku_col = _find_column(df_tc, ["custom_sku", "customSku", "custom_SKU", "sku"])
+    tc_sku_map = {}
+    if tc_custom_sku_col:
+        tc_sku_map = df_tc.set_index(tc_id_col)[tc_custom_sku_col].dropna().to_dict()
+
     # Build bidirectional ID to package-number mappings from TC report (crucial for Zalora package lookup)
     tc_id_to_num = {}
     tc_num_to_id = {}
@@ -1211,9 +1266,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             ref_date = temp_ref_date
 
         # Ensure sla_status column exists in df_pending
-        if "sla_status" not in df_pending.columns:
-            df_pending["sla_status"] = ""
-
+        pend_sku_col = _find_column(df_pending, ["custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
         for idx, row in df_pending.iterrows():
             order_id = row[pend_id_col]
             sla_val = row[target_sla_col]
@@ -1259,6 +1312,10 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             # Perform TC cross-check
             is_in_tc = (order_id_str in tc_order_ids_set) or (tc_mapped_num_str and tc_mapped_num_str in tc_order_ids_set)
             
+            pend_sku_val = ""
+            if pend_sku_col and pend_sku_col in row:
+                pend_sku_val = row.get(pend_sku_col, "")
+                
             if not is_in_tc:
                 # Flag missing in TC
                 df_pending.at[idx, "Final Remarks"] = "Order missing in TC"
@@ -1269,7 +1326,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                 missing_tc_discrepancies.append({
                     "Order ID": order_id_str,
                     "Nickname": store_val,
-                    "SKU": "",
+                    "SKU": pend_sku_val,
                     "Validation Result": "Order missing in TC",
                     "TC Order Status": "Missing",
                     "TC Item Status": "Missing",
@@ -1300,15 +1357,34 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                         df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
                         not_pushed_count += 1
                         
+                        # Retrieve original status and SKU from TC for "Not Pushed to OMS" discrepancy
+                        tc_sku_val = tc_sku_map.get(order_id_str, "")
+                        if not tc_sku_val and tc_mapped_num_str:
+                            tc_sku_val = tc_sku_map.get(tc_mapped_num_str, "")
+                        if not tc_sku_val:
+                            tc_sku_val = pend_sku_val
+                            
+                        tc_ord_status = tc_order_status_map.get(order_id_str, "")
+                        if not tc_ord_status and tc_mapped_num_str:
+                            tc_ord_status = tc_order_status_map.get(tc_mapped_num_str, "")
+                        if not tc_ord_status:
+                            tc_ord_status = pay_status if pay_status else "Paid/COD"
+                            
+                        tc_itm_status = tc_item_status_map.get(order_id_str, "")
+                        if not tc_itm_status and tc_mapped_num_str:
+                            tc_itm_status = tc_item_status_map.get(tc_mapped_num_str, "")
+                        if not tc_itm_status:
+                            tc_itm_status = pay_status if pay_status else "Paid/COD"
+                        
                         # Add to discrepancies
                         store_val = _clean_str(row.get(target_store_col, ""))
                         missing_tc_discrepancies.append({
                             "Order ID": order_id_str,
                             "Nickname": store_val,
-                            "SKU": "",
+                            "SKU": tc_sku_val,
                             "Validation Result": "Not Pushed to OMS",
-                            "TC Order Status": pay_status if pay_status else "Paid/COD",
-                            "TC Item Status": pay_status if pay_status else "Paid/COD",
+                            "TC Order Status": tc_ord_status,
+                            "TC Item Status": tc_itm_status,
                             "OMS Order Status": "Not in OMS",
                             "OMS Line Status": "Not in OMS",
                             "Details": "Paid or COD order is present in TC but missing from OMS Report."
