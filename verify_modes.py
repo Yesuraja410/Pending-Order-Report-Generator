@@ -11,18 +11,20 @@ from order_processor import process_and_validate_orders
 def test_mode_1_gsheet_oms():
     print("Testing Mode 1: GSheet + OMS Report Alone...")
     # ORD-1: Pushed (no status mismatch)
-    # ORD-2: Pushed (status mismatch)
+    # ORD-2: Pushed (status mismatch: Rule 3 OMS Shipped but Pending READY_TO_SHIP)
     # ORD-3: Not Pushed to OMS
     df_pending = pd.DataFrame({
         "Order ID": ["ORD-1", "ORD-2", "ORD-3"],
         "Store Name": ["shopee-MY", "lazada-SG", "zalora-PH"],
         "SLA": ["2026-07-20", "2026-07-21", "2026-07-22"],
+        "custom_sku": ["4063697120658", "4063697120665", "4063697120672"],
         "order_status": ["READY_TO_SHIP", "READY_TO_SHIP", "NEW"],
         "sla_status": ["future", "future", "breached"]
     })
     
     df_oms = pd.DataFrame({
         "Order ID": ["ORD-1", "ORD-2"],
+        "ean": ["4063697120658", "4063697120665"],
         "order_status": ["READY_TO_SHIP", "SHIPPED"], # ORD-2 has mismatch
         "line_status": ["READY_TO_SHIP", "SHIPPED"]
     })
@@ -96,7 +98,7 @@ def test_mode_3_tc_oms():
         "Payment Status": ["completed", "completed", "completed"],
         "Payment Method": ["creditcard", "creditcard", "creditcard"],
         "time_to_ship_dead_line": ["2026-07-20", "2026-07-21", "2026-07-22"],
-        "Custom SKU": ["SKU-1", "SKU-2", "SKU-3"]
+        "Custom SKU": ["4063697120658", "4063697120665", "4063697120672"]
     })
 
     # OMS contains ORD-1 (READY TO SHIP - matches), ORD-2 (SHIPPED - matches), ORD-3 (missing - not pushed)
@@ -104,7 +106,7 @@ def test_mode_3_tc_oms():
         "Order ID": ["ORD-1", "ORD-2"],
         "order_status": ["READY_TO_SHIP", "SHIPPED"],
         "line_status": ["READY_TO_SHIP", "SHIPPED"],
-        "ean": ["SKU-1", "SKU-2"]
+        "ean": ["4063697120658", "4063697120665"]
     })
 
     res = process_and_validate_orders(
@@ -127,7 +129,38 @@ def test_mode_3_tc_oms():
     assert summary["not_pushed_count"] == 1 # ORD-3
     print("Mode 3 passed!\n")
 
+def test_excel_formatter():
+    print("Testing Excel formatting output...")
+    from excel_formatter import generate_excel_workbook
+    raw_df = pd.DataFrame({
+        "Order ID": ["ORD-1"],
+        "Store Name": ["PUMA-MY"],
+        "SLA": ["2026-07-20"],
+        "OMS Order Status": ["READY_TO_SHIP"],
+        "Final Remarks": ["Successfully Pushed to OMS"]
+    })
+    pivot_df = pd.DataFrame({
+        "OMS Order Status": ["READY_TO_SHIP"],
+        "Grand Total": [1]
+    }, index=pd.Index(["Lazada MY"], name="Channel"))
+    pivot_df = pivot_df.reset_index()
+    
+    summary_df = pd.DataFrame([
+        {"Metric": "Overdue (SLA breached)", "Count": 0},
+        {"Metric": "Handover today (Today SLA)", "Count": 0},
+        {"Metric": "Order Status at New", "Count": 0},
+        {"Metric": "Within SLA (Future)", "Count": 0},
+        {"Metric": "Not reflecting in OM", "Count": 0}
+    ])
+    
+    wb = generate_excel_workbook("MY", raw_df, pivot_df, summary_df, "20-07-2026")
+    wb.save("test_out.xlsx")
+    print("Excel formatting check passed! File saved as test_out.xlsx.\n")
+    if os.path.exists("test_out.xlsx"):
+        os.remove("test_out.xlsx")
+
 if __name__ == "__main__":
     test_mode_1_gsheet_oms()
     test_mode_2_tc_marketplace()
     test_mode_3_tc_oms()
+    test_excel_formatter()
