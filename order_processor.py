@@ -1016,7 +1016,7 @@ def load_and_preprocess_marketplace_files(marketplace_files):
         return pd.DataFrame(columns=["Correct Order Number", "Store Name", "SKU", "Order Date", "Final Remarks", "OMS Order Status", "SLA Source", "SLA", "sla_status"])
 
 def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
-    tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    tc_id_col = _find_column(df_tc, ["order_number", "order_id", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     if not tc_id_col:
         raise KeyError(f"Could not find 'Order ID' column in TC Order Report. Available: {list(df_tc.columns)}")
 
@@ -1178,7 +1178,7 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
 def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     import re
     # Find column names in TC
-    tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    tc_id_col = _find_column(df_tc, ["order_number", "order_id", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     tc_num_col = _find_column(df_tc, ["order_no", "Order No", "Order Number", "Order Number / Reference No"])
     tc_status_col = _find_column(df_tc, ["order_status", "TC Status", "Order Status", "Status", "TC_Status"])
     tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
@@ -1697,7 +1697,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     # If the g sheet / pending file is not uploaded, generate df_pending from TC Report
     # pending orders from TC with status of NEW, READY TO SHIP & ACCEPTED/PICKED
     if df_pending.empty:
-        tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+        tc_id_col = _find_column(df_tc, ["order_number", "order_id", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
         tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
         tc_status_col = _find_column(df_tc, ["order_status", "TC Status", "Order Status", "Status", "TC_Status"])
         tc_sla_col = _find_column(df_tc, ["time_to_ship_dead_line", "order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
@@ -1784,7 +1784,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             oms_pushed_col = "oms_pushed"
     
     # TC Report columns (All file)
-    tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+    tc_id_col = _find_column(df_tc, ["order_number", "order_id", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     tc_num_col = _find_column(df_tc, ["order_number", "order_id"]) # specifically find order_number column
     tc_status_col = _find_column(df_tc, ["order_status", "TC Status", "Order Status", "Status", "TC_Status"])
     
