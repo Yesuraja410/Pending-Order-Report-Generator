@@ -15,12 +15,14 @@ COLOR_ORANGE = 'FFC000'      # Handover Today (Today SLA)
 COLOR_DARK_RED = 'C00000'    # Order status at NEW
 COLOR_GREEN = '92D050'       # Within SLA (Future)
 COLOR_LIGHT_GREEN = 'E2EFDA'  # Not reflected in OMS
+COLOR_GREY = 'D3D3D3'         # Unpaid Orders
 
 FILL_RED = PatternFill(start_color=COLOR_RED, end_color=COLOR_RED, fill_type='solid')
 FILL_ORANGE = PatternFill(start_color=COLOR_ORANGE, end_color=COLOR_ORANGE, fill_type='solid')
 FILL_DARK_RED = PatternFill(start_color=COLOR_DARK_RED, end_color=COLOR_DARK_RED, fill_type='solid')
 FILL_GREEN = PatternFill(start_color=COLOR_GREEN, end_color=COLOR_GREEN, fill_type='solid')
 FILL_LIGHT_GREEN = PatternFill(start_color=COLOR_LIGHT_GREEN, end_color=COLOR_LIGHT_GREEN, fill_type='solid')
+FILL_GREY = PatternFill(start_color=COLOR_GREY, end_color=COLOR_GREY, fill_type='solid')
 
 FONT_WHITE_BOLD = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
 FONT_BLACK_BOLD = Font(name='Calibri', size=11, bold=True, color='000000')
@@ -251,7 +253,8 @@ def add_country_sheets_to_workbook(wb, country, raw_df, pivot_df, summary_df, re
         ("Handover today (Today SLA)", "Handover Today", FILL_ORANGE, FONT_BLACK_BOLD),
         ("Order Status at New", "Order status at NEW", FILL_DARK_RED, FONT_WHITE_BOLD),
         ("Within SLA (Future)", "Within SLA", FILL_GREEN, FONT_BLACK_BOLD),
-        ("Not reflecting in OM", "Not reflected in OMS", FILL_LIGHT_GREEN, FONT_BLACK_BOLD)
+        ("Not reflecting in OM", "Not reflected in OMS", FILL_LIGHT_GREEN, FONT_BLACK_BOLD),
+        ("Unpaid Orders", "Unpaid Orders", FILL_GREY, FONT_BLACK_BOLD)
     ]
     
     for idx, (original_name, display_name, fill, font) in enumerate(metrics_list):
