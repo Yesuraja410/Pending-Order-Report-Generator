@@ -98,7 +98,7 @@ def _clean_order_id(val):
     if s.endswith(".0"):
         s = s[:-2]
         
-    return s
+    return s.upper()
 
 def parse_country_and_channel(nickname):
     nick = str(nickname).strip().upper()
@@ -449,15 +449,19 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
 
     oms_status_map = {}
+    oms_order_status_fallback_map = {}
     oms_ean_col = _find_column(df_oms, ["ean", "EAN", "Ean", "item_sku", "SKU"])
     
     if oms_id_col:
         for _, row in df_oms.iterrows():
             oid = _clean_order_id(row[oms_id_col])
+            if not oid:
+                continue
             ean = normalize_ean(row.get(oms_ean_col)) if oms_ean_col else ""
             key = oid + ean
-            if oms_status_col and oms_status_col in row:
-                oms_status_map[key] = row[oms_status_col]
+            stat_val = _clean_str(row.get(oms_status_col, "")) if oms_status_col else ""
+            oms_status_map[key] = stat_val
+            oms_order_status_fallback_map[oid] = stat_val
 
     df_pending["OMS Order Status"] = ""
     df_pending["Final Remarks"] = ""
@@ -524,15 +528,13 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         is_in_oms = False
         oms_stat = ""
         
-        if key in oms_status_map:
-            is_in_oms = True
-            oms_stat = oms_status_map[key]
-        else:
-            # Fallback to Order ID check
-            matching_keys = [k for k in oms_status_map if k.startswith(order_id_str)]
-            if matching_keys:
+        if order_id_str:
+            if key in oms_status_map:
                 is_in_oms = True
-                oms_stat = oms_status_map[matching_keys[0]]
+                oms_stat = oms_status_map[key]
+            elif order_id_str in oms_order_status_fallback_map:
+                is_in_oms = True
+                oms_stat = oms_order_status_fallback_map[order_id_str]
                 
         if is_in_oms:
             df_pending.at[idx, "OMS Order Status"] = oms_stat
@@ -1318,12 +1320,13 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             is_in_oms = False
             oms_stat = ""
             
-            if order_id in oms_status_map:
-                is_in_oms = True
-                oms_stat = oms_status_map[order_id]
-            elif tc_mapped_num and tc_mapped_num in oms_status_map:
-                is_in_oms = True
-                oms_stat = oms_status_map[tc_mapped_num]
+            if order_id:
+                if order_id in oms_status_map:
+                    is_in_oms = True
+                    oms_stat = oms_status_map[order_id]
+                elif tc_mapped_num_str and tc_mapped_num_str in oms_status_map:
+                    is_in_oms = True
+                    oms_stat = oms_status_map[tc_mapped_num_str]
                 
             # Perform TC cross-check
             is_in_tc = (order_id_str in tc_order_ids_set) or (tc_mapped_num_str and tc_mapped_num_str in tc_order_ids_set)
