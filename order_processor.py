@@ -827,6 +827,85 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         "ref_date_dmy": ref_date_dmy
     }
 
+def detect_marketplace_channel(row, order_id_val, columns):
+    # Lazada check
+    is_lazada = False
+    for col in columns:
+        col_lower = str(col).strip().lower()
+        if "lazada" in col_lower or "lazadasku" in col_lower or "lazada sku" in col_lower:
+            is_lazada = True
+            break
+    if is_lazada:
+        country = "PH" # default
+        for col in columns:
+            col_lower = str(col).strip().lower()
+            if "shippingcountry" in col_lower or "shipping country" in col_lower or "country" in col_lower:
+                val = str(row.get(col, "")).strip().upper()
+                if val:
+                    country = val
+                    break
+        return f"Lazada {country}"
+
+    # Shopee check
+    is_shopee = False
+    for col in columns:
+        col_lower = str(col).strip().lower()
+        if "shopee rebate" in col_lower or "shopee_rebate" in col_lower or "shopee" in col_lower:
+            is_shopee = True
+            break
+    if is_shopee:
+        country = "MY" # default
+        for col in columns:
+            if "php" in str(col).lower():
+                country = "PH"
+                break
+        for col in columns:
+            col_lower = str(col).strip().lower()
+            if "country" in col_lower or "shipping country" in col_lower:
+                val = str(row.get(col, "")).strip().upper()
+                if val in ("PH", "MY", "SG"):
+                    country = val
+                    break
+        return f"Shopee {country}"
+
+    # Zalora check
+    is_zalora = False
+    for col in columns:
+        col_lower = str(col).strip().lower()
+        if "zalora" in col_lower or "zalora sku" in col_lower or "zalorasku" in col_lower:
+            is_zalora = True
+            break
+    if is_zalora:
+        country = "PH" # default
+        for col in columns:
+            col_lower = str(col).strip().lower()
+            if "shipping country" in col_lower or "shippingcountry" in col_lower or "country" in col_lower:
+                val = str(row.get(col, "")).strip().upper()
+                if val:
+                    country = val
+                    break
+        return f"Zalora {country}"
+
+    # TikTok check
+    oid_str = str(order_id_val).strip()
+    if len(oid_str) == 18 and oid_str.isdigit():
+        return "TikTok MY"
+
+    # Default fallback using store name / nickname if available
+    store_col = None
+    for col in columns:
+        col_lower = str(col).strip().lower()
+        if col_lower in ("nickname", "store name", "store", "seller", "seller name", "marketplace", "shop name", "shop"):
+            store_col = col
+            break
+    if store_col:
+        store_val = str(row.get(store_col, "")).strip()
+        if store_val and store_val != "Default Store":
+            c_code, chan = parse_country_and_channel(store_val)
+            return f"{chan} {c_code}"
+
+    return "Marketplace Default"
+
 def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
     # Find ID and nickname/store column in both Reports
     tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
@@ -862,13 +941,14 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
         df_marketplace["sla_status"] = ""
 
     target_store_col = mp_store_col if mp_store_col else "Store Name"
-    if target_store_col not in df_marketplace.columns:
-        df_marketplace[target_store_col] = "Default Store"
-
-    # Clean store column to remove PUMA_ prefix case-insensitively
-    df_marketplace[target_store_col] = df_marketplace[target_store_col].apply(
-        lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
-    )
+    
+    # Resolve dynamic channel names using detect_marketplace_channel
+    resolved_channels = []
+    for idx, row in df_marketplace.iterrows():
+        channel_detected = detect_marketplace_channel(row, row[mp_id_col], df_marketplace.columns)
+        resolved_channels.append(channel_detected)
+        
+    df_marketplace[target_store_col] = resolved_channels
 
     discrepancies = []
     reflected_count = 0
@@ -982,7 +1062,7 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             if not country_df_missing.empty:
                 country_df_export = pd.DataFrame({
                     "Order ID": country_df_missing["Correct Order Number"],
-                    "Channel Name": country_df_missing["Channel"]
+                    "Channel Name": country_df_missing[target_store_col]
                 })
             else:
                 country_df_export = pd.DataFrame(columns=["Order ID", "Channel Name"])
@@ -998,7 +1078,7 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
     if not df_missing.empty:
         df_missing_export = pd.DataFrame({
             "Order ID": df_missing[mp_id_col],
-            "Channel Name": df_missing[target_store_col].apply(lambda x: " ".join(parse_country_and_channel(x)[::-1]))
+            "Channel Name": df_missing[target_store_col]
         })
     else:
         df_missing_export = pd.DataFrame(columns=["Order ID", "Channel Name"])
