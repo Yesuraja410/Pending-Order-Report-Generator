@@ -210,3 +210,125 @@ def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_d
         return True, "Email sent successfully!"
     except Exception as e:
         return False, f"Failed to send email: {str(e)}"
+
+def send_country_report_email(smtp_config, country, to_email, cc_email, excel_bytes, ref_date_str):
+    """
+    Send the country-specific Excel report to the seller via SMTP.
+    """
+    import smtplib
+    from datetime import datetime
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+
+    if not to_email or "@" not in to_email:
+        return False, "Recipient 'To' email address is required and must be valid."
+        
+    host = smtp_config.get("host")
+    port = int(smtp_config.get("port", 587))
+    user = smtp_config.get("user")
+    password = smtp_config.get("password")
+    use_tls = smtp_config.get("use_tls", True)
+    sender_email = smtp_config.get("sender_email", user)
+
+    # Build subject and attachment filename
+    date_suffix = ref_date_str if ref_date_str else datetime.today().strftime('%d-%m-%Y')
+    subject = f"PUMA {country} - Pending Order & SLA Report ({date_suffix})"
+    filename = f"Pending_order_report_-_PUMA_{country}_{date_suffix}.xlsx"
+
+    # Build nice HTML email body
+    email_html = f"""
+    <html>
+    <head>
+        <style>
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                color: #333333;
+                background-color: #f9f9f9;
+                margin: 0;
+                padding: 20px;
+            }}
+            .container {{
+                max-width: 700px;
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 30px;
+                margin: 0 auto;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            }}
+            .header {{
+                border-bottom: 2px solid #BA0C2F;
+                padding-bottom: 15px;
+                margin-bottom: 20px;
+            }}
+            .header h2 {{
+                color: #BA0C2F;
+                margin: 0;
+                font-size: 24px;
+            }}
+            .footer {{
+                font-size: 12px;
+                color: #888888;
+                border-top: 1px solid #e0e0e0;
+                padding-top: 15px;
+                margin-top: 30px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>PUMA {country} - Daily Pending Order & SLA Report</h2>
+                <p style="margin: 5px 0 0 0; color: #666666;">Date: <strong>{date_suffix}</strong></p>
+            </div>
+            
+            <p>Dear Seller Partner,</p>
+            <p>Please find attached the daily Pending Order and SLA Status validation report for <strong>PUMA {country}</strong>. Kindly review the details to ensure prompt fulfillment and address any status mismatches highlighted.</p>
+            
+            <p>The complete report with all order statuses and validation checks has been attached to this email as an Excel spreadsheet.</p>
+
+            <p style="font-size: 14px;">Best regards,<br>
+            <strong>Operations & Analytics Team</strong></p>
+            
+            <div class="footer">
+                This is an automated report. Please do not reply directly to this email.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    msg = MIMEMultipart()
+    msg["From"] = f"Operations Team <{sender_email}>"
+    msg["To"] = to_email
+    
+    # Add Cc if provided
+    recipients = [email.strip() for email in to_email.split(",") if email.strip()]
+    if cc_email:
+        msg["Cc"] = cc_email
+        recipients += [email.strip() for email in cc_email.split(",") if email.strip()]
+
+    msg["Subject"] = subject
+    msg.attach(MIMEText(email_html, "html"))
+
+    # Attach Excel file
+    attachment = MIMEApplication(excel_bytes, _subtype="xlsx")
+    attachment.add_header("Content-Disposition", "attachment", filename=filename)
+    msg.attach(attachment)
+
+    try:
+        if use_tls:
+            server = smtplib.SMTP(host, port, timeout=15)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        else:
+            server = smtplib.SMTP_SSL(host, port, timeout=15)
+            
+        server.login(user, password)
+        server.sendmail(sender_email, recipients, msg.as_string())
+        server.quit()
+        return True, f"Report email for PUMA {country} sent successfully!"
+    except Exception as e:
+        return False, f"Failed to send email: {str(e)}"
