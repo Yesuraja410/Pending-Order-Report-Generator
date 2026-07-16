@@ -1014,7 +1014,8 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
         "not_pushed_count": missing_count,
         "unpaid_count": 0,
         "total_sellers": len(seller_groups),
-        "all_imported_to_tc": (len(df_discrepancies) == 0)
+        "all_imported_to_tc": (len(df_discrepancies) == 0),
+        "mode": "tc_marketplace"
     }
 
     return {
@@ -1416,11 +1417,12 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             }
 
     ref_date_str = datetime.today().strftime('%d-%m-%Y')
-    pushed_cnt = int(main_df["OMS Order Status"].apply(lambda x: str(x).strip().lower() not in ("not in oms", "n/a", "")).sum())
-    not_pushed_cnt = len(main_df) - pushed_cnt
+    total_orders = len(df_marketplace) if (df_marketplace is not None and not df_marketplace.empty) else len(df_tc)
+    pushed_cnt = total_orders - total_discrepancies
+    not_pushed_cnt = total_discrepancies
 
     summary = {
-        "total_pending_orders": len(main_df),
+        "total_pending_orders": total_orders,
         "enriched_sla_count": 0,
         "blank_sla_not_found": 0,
         "total_discrepancies": total_discrepancies,
@@ -1430,7 +1432,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         "not_pushed_count": not_pushed_cnt,
         "unpaid_count": 0,
         "total_sellers": len(seller_groups),
-        "all_imported_to_tc": (total_discrepancies == 0)
+        "all_imported_to_tc": (total_discrepancies == 0),
+        "mode": "tc_oms"
     }
 
     return {
