@@ -53,27 +53,36 @@ with st.sidebar:
 # == Main Screen ===============================================================
 # Check if files are uploaded
 has_pending = order_pending is not None
-has_tc = (order_tc is not None) or (marketplace_reports is not None and len(marketplace_reports) > 0)
+has_tc_uploaded = order_tc is not None
+has_mp_uploaded = (marketplace_reports is not None and len(marketplace_reports) > 0)
 has_oms = order_oms is not None
+
+# Backward compatibility for other checks in app.py
+has_tc = has_tc_uploaded or has_mp_uploaded
 
 is_valid_combo = False
 mode_desc = ""
 
-# 1. Mode 1: GSheet + OMS Report Alone
-if has_pending and has_oms and not has_tc:
+# 1. Mode 1: GSheet + OMS Report Alone (No TC/MP required)
+if has_pending and has_oms and not has_tc_uploaded and not has_mp_uploaded:
     is_valid_combo = True
     mode_desc = "GSheet + OMS Validation Mode"
 # 2. Mode 2: TC Order Report + Marketplace Reports alone
-elif has_tc and not has_pending and not has_oms:
+elif has_tc_uploaded and has_mp_uploaded and not has_pending and not has_oms:
     is_valid_combo = True
     mode_desc = "TC + Marketplace Reconciliation Mode"
-# 3. Mode 3/4: TC/Marketplace + OMS (with or without GSheet)
-elif has_tc and has_oms:
+# 3. Mode 3: TC Order Report + OMS (without Marketplace)
+elif has_tc_uploaded and has_oms and not has_mp_uploaded and not has_pending:
     is_valid_combo = True
-    if has_pending:
-        mode_desc = "Full Validation Mode (GSheet + TC + OMS)"
-    else:
-        mode_desc = "TC + OMS Validation Mode"
+    mode_desc = "TC + OMS Validation Mode"
+# 4. Mode 4: TC Order Report + Marketplace + OMS (without GSheet)
+elif has_tc_uploaded and has_mp_uploaded and has_oms and not has_pending:
+    is_valid_combo = True
+    mode_desc = "TC + Marketplace + OMS Validation Mode"
+# 5. Mode 5: GSheet + TC + OMS (with optional Marketplace)
+elif has_pending and has_tc_uploaded and has_oms:
+    is_valid_combo = True
+    mode_desc = "Full Validation Mode (GSheet + TC + OMS)"
 
 if not is_valid_combo:
     st.info(
