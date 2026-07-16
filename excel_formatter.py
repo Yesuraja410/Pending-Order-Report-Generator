@@ -105,7 +105,12 @@ def autofit_columns(ws, df=None, min_width=10, padding=3):
         # Optimized vectorized logic from DataFrame for fast execution
         for col_idx, col_name in enumerate(df.columns, start=1):
             col_letter = get_column_letter(col_idx)
-            max_len = int(df[col_name].astype(str).str.len().max())
+            lengths = df[col_name].astype(str).str.len()
+            max_len = 0
+            if not lengths.empty:
+                val = lengths.max()
+                if pd.notna(val):
+                    max_len = int(val)
             header_len = len(str(col_name))
             ws.column_dimensions[col_letter].width = max(max(max_len, header_len) + padding, min_width)
     else:
