@@ -978,8 +978,14 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             ]
             summary_df = pd.DataFrame(summary_metrics)
             
-            cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel"]
-            country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
+            country_df_missing = country_df[country_df["Final Remarks"] == "Order missing in TC"].copy()
+            if not country_df_missing.empty:
+                country_df_export = pd.DataFrame({
+                    "Order ID": country_df_missing["Correct Order Number"],
+                    "Channel Name": country_df_missing["Channel"]
+                })
+            else:
+                country_df_export = pd.DataFrame(columns=["Order ID", "Channel Name"])
             
             country_reports[country] = {
                 "raw_df": country_df_export,
@@ -988,6 +994,15 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             }
 
     ref_date_str = datetime.today().strftime('%d-%m-%Y')
+    df_missing = df_marketplace[df_marketplace["Final Remarks"] == "Order missing in TC"].copy()
+    if not df_missing.empty:
+        df_missing_export = pd.DataFrame({
+            "Order ID": df_missing[mp_id_col],
+            "Channel Name": df_missing[target_store_col].apply(lambda x: " ".join(parse_country_and_channel(x)[::-1]))
+        })
+    else:
+        df_missing_export = pd.DataFrame(columns=["Order ID", "Channel Name"])
+
     summary = {
         "total_pending_orders": len(df_marketplace),
         "enriched_sla_count": 0,
@@ -1003,11 +1018,11 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
     }
 
     return {
-        "enriched_pending_df": df_marketplace,
+        "enriched_pending_df": df_missing_export,
         "discrepancies_df": df_discrepancies,
         "summary": summary,
         "seller_groups": seller_groups,
-        "pending_order_id_col": mp_id_col,
+        "pending_order_id_col": "Order ID",
         "country_reports": country_reports,
         "ref_date_dmy": ref_date_str
     }
@@ -1290,6 +1305,13 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     ])
     total_discrepancies = len(df_discrepancies)
 
+    # If TC + OMS validation (no marketplace report), set main_df to contain ONLY discrepancies
+    if df_marketplace is None or df_marketplace.empty:
+        main_df = df_discrepancies.copy()
+        target_store_col = "Nickname"
+        if "Nickname" not in main_df.columns:
+            main_df["Nickname"] = "Default Store"
+            
     # Build groupings
     seller_groups = {}
     for s_name, sub_grp in main_df.groupby(target_store_col):
@@ -1305,42 +1327,46 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             "summary_df": pd.DataFrame()
         }
 
-    main_id_col = _find_column(main_df, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-    if not main_id_col:
-        main_id_col = "Order ID"
-        main_df["Order ID"] = ""
+    main_id_col = "Order ID"
+    if not (df_marketplace is None or df_marketplace.empty):
+        main_id_col = _find_column(main_df, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+        if not main_id_col:
+            main_id_col = "Order ID"
+            main_df["Order ID"] = ""
+            
+        main_df["Correct Order Number"] = main_df[main_id_col]
+        main_df["OMS Order Status"] = "N/A"
         
-    main_df["Correct Order Number"] = main_df[main_id_col]
-    main_df["OMS Order Status"] = "N/A"
-    
-    # Fill OMS Order Status from lookup
-    for idx, row in main_df.iterrows():
-        oid = _clean_order_id(row[main_id_col])
-        sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col and tc_sku_col in main_df.columns else ""
-        ean_val = normalize_ean(sku_val)
-        key1 = oid + ean_val
-        onum = tc_id_to_num.get(oid, "")
-        key3 = onum + ean_val if onum else ""
-        
-        if key1 in oms_status_map:
-            main_df.at[idx, "OMS Order Status"] = oms_status_map[key1]
-        elif oid in oms_order_status_fallback_map:
-            main_df.at[idx, "OMS Order Status"] = oms_order_status_fallback_map[oid]
-        elif key3 and key3 in oms_status_map:
-            main_df.at[idx, "OMS Order Status"] = oms_status_map[key3]
-        elif onum and onum in oms_order_status_fallback_map:
-            main_df.at[idx, "OMS Order Status"] = oms_order_status_fallback_map[onum]
-
-    if "Final Remarks" not in main_df.columns:
-        main_df["Final Remarks"] = ""
+        # Fill OMS Order Status from lookup
         for idx, row in main_df.iterrows():
             oid = _clean_order_id(row[main_id_col])
-            # Check if this order is in discrepancies as Not Pushed or Status Mismatch
-            order_discs = [d for d in discrepancies if d["Order ID"] == oid]
-            if order_discs:
-                main_df.at[idx, "Final Remarks"] = order_discs[0]["Validation Result"]
-            else:
-                main_df.at[idx, "Final Remarks"] = "Imported & Pushed to OMS"
+            sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col and tc_sku_col in main_df.columns else ""
+            ean_val = normalize_ean(sku_val)
+            key1 = oid + ean_val
+            onum = tc_id_to_num.get(oid, "")
+            key3 = onum + ean_val if onum else ""
+            
+            if key1 in oms_status_map:
+                main_df.at[idx, "OMS Order Status"] = oms_status_map[key1]
+            elif oid in oms_order_status_fallback_map:
+                main_df.at[idx, "OMS Order Status"] = oms_order_status_fallback_map[oid]
+            elif key3 and key3 in oms_status_map:
+                main_df.at[idx, "OMS Order Status"] = oms_status_map[key3]
+            elif onum and onum in oms_order_status_fallback_map:
+                main_df.at[idx, "OMS Order Status"] = oms_order_status_fallback_map[onum]
+
+        if "Final Remarks" not in main_df.columns:
+            main_df["Final Remarks"] = ""
+            for idx, row in main_df.iterrows():
+                oid = _clean_order_id(row[main_id_col])
+                order_discs = [d for d in discrepancies if d["Order ID"] == oid]
+                if order_discs:
+                    main_df.at[idx, "Final Remarks"] = order_discs[0]["Validation Result"]
+                else:
+                    main_df.at[idx, "Final Remarks"] = "Imported & Pushed to OMS"
+    else:
+        main_df["Correct Order Number"] = main_df["Order ID"]
+        main_df["Final Remarks"] = main_df["Validation Result"]
 
     main_df["_country"] = main_df[target_store_col].apply(lambda x: parse_country_and_channel(x)[0])
     for country, country_grp in main_df.groupby("_country"):
