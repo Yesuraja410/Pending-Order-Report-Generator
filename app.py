@@ -281,12 +281,13 @@ else:
                     # Fetch count for each metric
                     metrics_dict = c_summary.set_index("Metric")["Count"].to_dict() if not c_summary.empty else {}
                     
-                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1, c2, c3, c4, c5, c6 = st.columns(6)
                     c1.metric("Overdue (SLA breached)", metrics_dict.get("Overdue (SLA breached)", 0), delta="Breached" if metrics_dict.get("Overdue (SLA breached)", 0) > 0 else None, delta_color="inverse")
                     c2.metric("Handover Today (Today SLA)", metrics_dict.get("Handover today (Today SLA)", 0))
                     c3.metric("Order Status at New", metrics_dict.get("Order Status at New", 0))
                     c4.metric("Within SLA (Future)", metrics_dict.get("Within SLA (Future)", 0))
                     c5.metric("Not reflecting in OM", metrics_dict.get("Not reflecting in OM", 0))
+                    c6.metric("Unpaid Orders", metrics_dict.get("Unpaid Orders", 0))
                     
                     # 2. Display Pivot Table
                     st.markdown(f"##### Pivot Table: Channel & OMS Status vs Dates ({country_sel})")
