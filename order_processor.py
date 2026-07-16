@@ -1016,6 +1016,8 @@ def load_and_preprocess_marketplace_files(marketplace_files):
         return pd.DataFrame(columns=["Correct Order Number", "Store Name", "SKU", "Order Date", "Final Remarks", "OMS Order Status", "SLA Source", "SLA", "sla_status"])
 
 def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
+    if df_tc is None or df_tc.empty:
+        raise ValueError("TC Order Report is empty or was not uploaded. Please upload the TC Order Report.")
     tc_id_col = _find_column(df_tc, ["order_number", "order_id", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     if not tc_id_col:
         raise KeyError(f"Could not find 'Order ID' column in TC Order Report. Available: {list(df_tc.columns)}")
@@ -1176,6 +1178,8 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
     }
 
 def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
+    if df_tc is None or df_tc.empty:
+        raise ValueError("TC Order Report is empty or was not uploaded. Please upload the TC Order Report.")
     import re
     # Find column names in TC
     tc_id_col = _find_column(df_tc, ["order_number", "order_id", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
