@@ -22,6 +22,15 @@ import excel_formatter
 
 inject_css()
 
+# Load default SMTP config from config.json
+smtp_defaults = {}
+try:
+    with open("config.json", "r") as config_file:
+        cfg = json.load(config_file)
+        smtp_defaults = cfg.get("smtp_config", {})
+except Exception:
+    pass
+
 # Custom title and introduction
 st.title("Pending Order SLA Enrichment & OMS Status Validation")
 st.write("Upload the daily SLA Report (GSheet Link), Marketplace Order Reports (TC Reports), and OMS Report (Sales Order file) in the sidebar to run validations and email reports directly to the sellers.")
@@ -100,16 +109,26 @@ else:
                 # Automatically share discrepancies to Slack group
                 disc_df_to_slack = res["discrepancies_df"]
                 if not disc_df_to_slack.empty:
-                    import json
                     smtp_cfg = {}
-                    try:
-                        with open("config.json", "r") as config_file:
-                            cfg = json.load(config_file)
-                            smtp_cfg = cfg.get("smtp_config", {})
-                    except Exception:
-                        pass
+                    if st.session_state.get("smtp_host"):
+                        smtp_cfg = {
+                            "host": st.session_state.get("smtp_host"),
+                            "port": int(st.session_state.get("smtp_port")) if str(st.session_state.get("smtp_port")).isdigit() else 587,
+                            "user": st.session_state.get("smtp_user"),
+                            "password": st.session_state.get("smtp_pass"),
+                            "sender_email": st.session_state.get("smtp_sender"),
+                            "use_tls": st.session_state.get("smtp_tls", True)
+                        }
                     
-                    if smtp_cfg and smtp_cfg.get("host"):
+                    if not smtp_cfg or not smtp_cfg.get("host") or not smtp_cfg.get("user"):
+                        try:
+                            with open("config.json", "r") as config_file:
+                                cfg = json.load(config_file)
+                                smtp_cfg = cfg.get("smtp_config", {})
+                        except Exception:
+                            pass
+                    
+                    if smtp_cfg and smtp_cfg.get("host") and smtp_cfg.get("user"):
                         from email_sender import send_discrepancies_to_slack_email
                         success_slack, msg_slack = send_discrepancies_to_slack_email(
                             smtp_config=smtp_cfg,
@@ -295,17 +314,37 @@ else:
                 
                 # Show expander for email settings
                 with st.expander("Configure SMTP Email Settings"):
-                    c_host = st.text_input("SMTP Server Host", value=secrets_smtp.get("host", "smtp.office365.com"), key="smtp_host")
-                    c_port = st.text_input("SMTP Port", value=str(secrets_smtp.get("port", 587)), key="smtp_port")
-                    c_user = st.text_input("SMTP Username", value=secrets_smtp.get("user", ""), key="smtp_user")
-                    c_pass = st.text_input("SMTP Password", type="password", value=secrets_smtp.get("password", ""), key="smtp_pass")
-                    c_sender = st.text_input("Sender Email Address", value=secrets_smtp.get("sender_email", c_user), key="smtp_sender")
-                    c_tls = st.checkbox("Use TLS", value=secrets_smtp.get("use_tls", True), key="smtp_tls")
+                    c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
+                    c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
+                    c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
+                    c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
+                    c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
+                    c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
                     
                     if st.button("Test Connection"):
                         is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
                         if is_ok:
                             st.success(msg)
+                            # Save to config.json
+                            try:
+                                with open("config.json", "r") as f:
+                                    cfg_data = json.load(f)
+                            except Exception:
+                                cfg_data = {}
+                            cfg_data["smtp_config"] = {
+                                "host": c_host,
+                                "port": int(c_port) if c_port.isdigit() else 587,
+                                "user": c_user,
+                                "password": c_pass,
+                                "sender_email": c_sender,
+                                "use_tls": c_tls
+                            }
+                            try:
+                                with open("config.json", "w") as f:
+                                    json.dump(cfg_data, f, indent=4)
+                                st.info("Saved SMTP configuration to config.json!")
+                            except Exception as save_err:
+                                st.warning(f"Could not save config.json: {save_err}")
                         else:
                             st.error(msg)
                             
