@@ -78,13 +78,14 @@ def test_mode_2_tc_marketplace():
     summary = res["summary"]
 
     print("  Summary:", summary)
-    print("  Enriched:\n", enriched[["Order ID", "Final Remarks"]].to_string())
+    print("  Enriched:\n", enriched[["Order ID", "Channel Name"]].to_string())
     print("  Discrepancies:\n", disc[["Order ID", "Validation Result", "Details"]].to_string())
 
     assert summary["total_pending_orders"] == 3
     assert summary["pushed_count"] == 2 # reflected count
     assert summary["not_pushed_count"] == 1 # missing count
     assert summary["all_imported_to_tc"] is False
+    assert len(enriched) == 1
     assert len(disc) == 1
     print("Mode 2 passed!\n")
 
