@@ -506,6 +506,7 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     discrepancies = []
     pushed_count = 0
     not_pushed_count = 0
+    unpaid_count = 0
     
     # Check what status column GSheet has for orders
     pend_status_col = _find_column(df_pending, ["order_status", "status", "Item Status", "orderItems.orderStatus", "TC Status"])
@@ -514,6 +515,13 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     # Check if there is an order number column and/or oms_pushed column in df_pending
     pend_num_col = _find_column(df_pending, ["order_number", "Order Number", "Order_No", "Correct Order Number"])
     oms_pushed_col = _find_column(df_pending, ["oms_pushed", "omsPushed", "OMS Pushed", "OMS_pushed"])
+    if not oms_pushed_col:
+        df_pending["oms_pushed"] = ""
+        oms_pushed_col = "oms_pushed"
+    
+    # Resolve payment columns if available
+    pend_pay_status_col = _find_column(df_pending, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"])
+    pend_pay_method_col = _find_column(df_pending, ["payment_methods", "Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
 
     for idx, row in df_pending.iterrows():
         order_id = row[pend_id_col]
@@ -657,16 +665,33 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "Details": f"Pending status is Delivery Failed, but OMS status is '{oms_stat}'."
                         })
         else:
-            if oms_pushed_col:
-                df_pending.at[idx, oms_pushed_col] = "Not Pushed"
-            if is_gsheet_cancelled:
-                # Rule 1 exception: If TC status cancelled and OMS order not found, ignore!
-                df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
-                df_pending.at[idx, "Final Remarks"] = "Cancelled (Ignored)"
+            # Check if this order is an Unpaid Order (payment status is NOT_INITIATED, etc. and method is not COD)
+            is_unpaid = False
+            if pend_pay_status_col:
+                pay_stat = _clean_str(row.get(pend_pay_status_col, ""))
+                pay_meth = _clean_str(row.get(pend_pay_method_col, "")) if pend_pay_method_col else ""
+                is_cod = any(term in pay_meth.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
+                is_pending = (pay_stat.lower() in ("pending", "unpaid", "awaiting", "not_initiated", "not_initiate", "not initiated"))
+                if is_pending and not is_cod:
+                    is_unpaid = True
+            
+            if is_unpaid:
+                df_pending.at[idx, "OMS Order Status"] = "Not in OMS - Unpaid orders"
+                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS - Unpaid orders"
+                if oms_pushed_col:
+                    df_pending.at[idx, oms_pushed_col] = "Not pushed - Unpaid Orders"
+                unpaid_count += 1
             else:
-                df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
-                df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
-                not_pushed_count += 1
+                if oms_pushed_col:
+                    df_pending.at[idx, oms_pushed_col] = "Not Pushed"
+                if is_gsheet_cancelled:
+                    # Rule 1 exception: If TC status cancelled and OMS order not found, ignore!
+                    df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                    df_pending.at[idx, "Final Remarks"] = "Cancelled (Ignored)"
+                else:
+                    df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                    df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
+                    not_pushed_count += 1
                 
                 discrepancies.append({
                     "Order ID": order_id_str,
@@ -722,7 +747,7 @@ def run_gsheet_oms_validation(df_pending, df_oms):
             if c_code == country:
                 final_rem = _clean_str(row.get("Final Remarks", ""))
                 oms_stat = _clean_str(row.get("OMS Order Status", ""))
-                if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
+                if oms_stat.lower() == "shipped":
                     continue
                 sla_val = row.get(target_sla_col)
                 if _is_blank(sla_val) or str(sla_val).strip() == "#N/A":
@@ -758,7 +783,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                 {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum()) if "sla_status" in country_df else 0},
                 {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
                 {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum()) if "sla_status" in country_df else 0},
-                {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())}
+                {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())},
+                {"Metric": "Unpaid Orders", "Count": int(country_df["Final Remarks"].astype(str).str.contains("Unpaid", case=False).sum()) if "Final Remarks" in country_df else 0}
             ]
             summary_df = pd.DataFrame(summary_metrics)
             
@@ -787,7 +813,7 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         "packed_mismatches": 0,
         "pushed_count": pushed_count,
         "not_pushed_count": not_pushed_count,
-        "unpaid_count": 0,
+        "unpaid_count": unpaid_count,
         "total_sellers": len(seller_groups)
     }
 
@@ -1175,6 +1201,9 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         if target_store_col not in df_pending.columns:
             df_pending[target_store_col] = "Default Store"
         oms_pushed_col = _find_column(df_pending, ["oms_pushed", "omsPushed", "OMS Pushed", "OMS_pushed"])
+        if not oms_pushed_col:
+            df_pending["oms_pushed"] = ""
+            oms_pushed_col = "oms_pushed"
     
     # TC Report columns (All file)
     tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
@@ -1390,11 +1419,13 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     pay_method = _clean_str(tc_payment_method.get(order_id, ""))
                     
                     is_cod = any(term in pay_method.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
-                    is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting"))
-                    is_completed = (pay_status.lower() in ("completed", "paid", "success", "complete", "fully_paid"))
+                    is_pending = (pay_status.lower() in ("pending", "unpaid", "awaiting", "not_initiated", "not_initiate", "not initiated"))
                     
                     if is_pending and not is_cod:
-                        df_pending.at[idx, "Final Remarks"] = "Unpaid Orders"
+                        df_pending.at[idx, "OMS Order Status"] = "Not in OMS - Unpaid orders"
+                        df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS - Unpaid orders"
+                        if oms_pushed_col:
+                            df_pending.at[idx, oms_pushed_col] = "Not pushed - Unpaid Orders"
                         unpaid_count += 1
                     else:
                         df_pending.at[idx, "Final Remarks"] = "Not Pushed to OMS"
@@ -1741,7 +1772,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     oms_stat = _clean_str(row.get("OMS Order Status", ""))
                     
                     # Ignore Unpaid orders and OMS shipped orders in country wise output reports
-                    if final_rem == "Unpaid Orders" or oms_stat.lower() == "shipped":
+                    if oms_stat.lower() == "shipped":
                         continue
                     sla_val = row.get(target_sla_col)
                     if _is_blank(sla_val) or str(sla_val).strip() == "#N/A":
@@ -1791,7 +1822,8 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum()) if "sla_status" in country_df else 0},
                     {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
                     {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum()) if "sla_status" in country_df else 0},
-                    {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())}
+                    {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())},
+                    {"Metric": "Unpaid Orders", "Count": int(country_df["Final Remarks"].astype(str).str.contains("Unpaid", case=False).sum()) if "Final Remarks" in country_df else 0}
                 ]
                 summary_df = pd.DataFrame(summary_metrics)
                 
