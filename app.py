@@ -96,6 +96,30 @@ else:
                 st.session_state["order_country_reports"] = res["country_reports"]
                 st.session_state["order_ref_date_dmy"] = res.get("ref_date_dmy", "")
                 st.success("Validation complete! See results below.")
+                
+                # Automatically share discrepancies to Slack group
+                disc_df_to_slack = res["discrepancies_df"]
+                if not disc_df_to_slack.empty:
+                    import json
+                    smtp_cfg = {}
+                    try:
+                        with open("config.json", "r") as config_file:
+                            cfg = json.load(config_file)
+                            smtp_cfg = cfg.get("smtp_config", {})
+                    except Exception:
+                        pass
+                    
+                    if smtp_cfg and smtp_cfg.get("host"):
+                        from email_sender import send_discrepancies_to_slack_email
+                        success_slack, msg_slack = send_discrepancies_to_slack_email(
+                            smtp_config=smtp_cfg,
+                            discrepancies_df=disc_df_to_slack,
+                            ref_date_str=res.get("ref_date_dmy", "")
+                        )
+                        if success_slack:
+                            st.success("📢 Automatically shared status discrepancies report to Slack channel `#order-related-issues`!")
+                        else:
+                            st.warning(f"⚠️ Could not automatically share discrepancies to Slack: {msg_slack}")
             except Exception as e:
                 st.error(f"Error during order processing: {str(e)}")
                 st.exception(e)
@@ -242,12 +266,13 @@ else:
         
         # Display layout of tables
         st.markdown("### Detailed Results")
+        # Display layout of tables
+        st.markdown("### Detailed Results")
         if has_pending:
-            sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs([
+            sub_tab1, sub_tab2, sub_tab3 = st.tabs([
                 "SLA Report", 
                 "Status Discrepancies", 
-                "Seller Grouping & Email Center",
-                "Country Pivots & Highlights"
+                "Country Reports & Email Center"
             ])
             
             with sub_tab1:
@@ -263,9 +288,39 @@ else:
                     st.warning(f"Found {len(disc_df)} discrepancies/warnings.")
                     st.dataframe(disc_df, use_container_width=True, hide_index=True)
                     
-            with sub_tab4:
-                st.markdown("#### Country Pivots & Highlight Metrics")
-                country_sel = st.selectbox("Select Country to View Summary & Pivot", ["SG", "MY", "PH"])
+            with sub_tab3:
+                st.markdown("#### SMTP Email Configuration")
+                # Load credentials from secrets or default to empty
+                secrets_smtp = st.secrets.get("smtp", {}) if st.secrets else {}
+                
+                # Show expander for email settings
+                with st.expander("Configure SMTP Email Settings"):
+                    c_host = st.text_input("SMTP Server Host", value=secrets_smtp.get("host", "smtp.office365.com"), key="smtp_host")
+                    c_port = st.text_input("SMTP Port", value=str(secrets_smtp.get("port", 587)), key="smtp_port")
+                    c_user = st.text_input("SMTP Username", value=secrets_smtp.get("user", ""), key="smtp_user")
+                    c_pass = st.text_input("SMTP Password", type="password", value=secrets_smtp.get("password", ""), key="smtp_pass")
+                    c_sender = st.text_input("Sender Email Address", value=secrets_smtp.get("sender_email", c_user), key="smtp_sender")
+                    c_tls = st.checkbox("Use TLS", value=secrets_smtp.get("use_tls", True), key="smtp_tls")
+                    
+                    if st.button("Test Connection"):
+                        is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
+                        if is_ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                            
+                smtp_config = {
+                    "host": c_host,
+                    "port": c_port,
+                    "user": c_user,
+                    "password": c_pass,
+                    "sender_email": c_sender,
+                    "use_tls": c_tls
+                }
+                
+                st.markdown("---")
+                st.markdown("#### Country Pivot Summary & Email sharing")
+                country_sel = st.selectbox("Select Country", ["SG", "MY", "PH"])
                 
                 c_data = country_reports.get(country_sel, {})
                 c_summary = c_data.get("summary_df", pd.DataFrame())
@@ -277,8 +332,6 @@ else:
                 else:
                     # 1. Highlight metrics using st.columns & metric cards
                     st.markdown(f"##### Highlight Metrics for {country_sel}")
-                    
-                    # Fetch count for each metric
                     metrics_dict = c_summary.set_index("Metric")["Count"].to_dict() if not c_summary.empty else {}
                     
                     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -301,23 +354,12 @@ else:
                     st.markdown("---")
                     st.markdown("##### 📧 Share Country Report with Seller Partner")
                     with st.expander(f"Send {country_sel} Report via Email", expanded=False):
-                        to_val = st.text_input("To:", value="yesuraja@graas.ai", key=f"to_{country_sel}")
-                        cc_val = st.text_input("Cc:", value="sudharsan.s@graas.ai", key=f"cc_{country_sel}")
+                        to_val = st.text_input("To:", value="sudharsan.s@graas.ai", key=f"to_{country_sel}")
+                        cc_val = st.text_input("Cc:", value="yesuraja@graas.ai", key=f"cc_{country_sel}")
                         
                         if st.button("Send Report", key=f"send_country_btn_{country_sel}", type="primary", use_container_width=True):
-                            # Load SMTP config
-                            smtp_config = st.session_state.get("smtp_config", {})
-                            if not smtp_config or not smtp_config.get("host"):
-                                import json
-                                try:
-                                    with open("config.json", "r") as config_file:
-                                        cfg = json.load(config_file)
-                                        smtp_config = cfg.get("smtp_config", {})
-                                except Exception:
-                                    pass
-                            
-                            if not smtp_config or not smtp_config.get("host"):
-                                st.error("❌ SMTP config not found. Please configure the SMTP Email details in the 'Email Setup' tab.")
+                            if not smtp_config.get("host"):
+                                st.error("❌ SMTP config not found. Please configure the SMTP Email details in the setup section above.")
                             else:
                                 with st.spinner(f"Generating and sending PUMA {country_sel} report..."):
                                     try:
@@ -334,7 +376,8 @@ else:
                                             to_email=to_val,
                                             cc_email=cc_val,
                                             excel_bytes=excel_bytes,
-                                            ref_date_str=ref_date_dmy
+                                            ref_date_str=ref_date_dmy,
+                                            urgent_orders_df=c_raw
                                         )
                                         if success:
                                             st.success(f"✅ {msg}")
@@ -342,87 +385,6 @@ else:
                                             st.error(f"❌ {msg}")
                                     except Exception as e:
                                         st.error(f"❌ An error occurred: {str(e)}")
-                        
-            with sub_tab3:
-                st.markdown("#### SMTP Email Configuration")
-                # Load credentials from secrets or default to empty
-                secrets_smtp = st.secrets.get("smtp", {}) if st.secrets else {}
-                
-                # Show expander for email settings
-                with st.expander("Configure SMTP Email Settings"):
-                    c_host = st.text_input("SMTP Server Host", value=secrets_smtp.get("host", "smtp.office365.com"), key="smtp_host")
-                    c_port = st.text_input("SMTP Port", value=str(secrets_smtp.get("port", 587)), key="smtp_port")
-                    c_user = st.text_input("SMTP Username", value=secrets_smtp.get("user", ""), key="smtp_user")
-                    c_pass = st.text_input("SMTP Password", type="password", value=secrets_smtp.get("password", ""), key="smtp_pass")
-                    c_sender = st.text_input("Sender Email Address", value=secrets_smtp.get("sender_email", c_user), key="smtp_sender")
-                    c_tls = st.checkbox("Use TLS", value=secrets_smtp.get("use_tls", True), key="smtp_tls")
-                    
-                    if st.button("Test Connection"):
-                        is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
-                        if is_ok:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-                            
-                # Display Sellers list
-                st.markdown("#### Send Daily Report to Sellers")
-                smtp_config = {
-                    "host": c_host,
-                    "port": c_port,
-                    "user": c_user,
-                    "password": c_pass,
-                    "sender_email": c_sender,
-                    "use_tls": c_tls
-                }
-                
-                st.info("You can send the filtered Excel report directly to each seller. Make sure to specify their email address below.")
-                
-                send_all_btn = st.button("Send Reports to All Sellers", type="secondary", use_container_width=True)
-                
-                seller_email_inputs = {}
-                for idx, (seller_name, info) in enumerate(seller_groups.items()):
-                    with st.container():
-                        col1, col2, col3, col4 = st.columns([3, 4, 2, 2])
-                        col1.markdown(f"**{seller_name}**")
-                        col2.write(f"Orders: {len(info['df'])}")
-                        
-                        default_email = info["email"]
-                        recipient = col3.text_input("Email", value=default_email, key=f"email_{seller_name}_{idx}", label_visibility="collapsed")
-                        seller_email_inputs[seller_name] = recipient
-                        
-                        send_single = col4.button("Send Email", key=f"send_{seller_name}_{idx}", use_container_width=True)
-                        if send_single:
-                            if not recipient:
-                                st.error("Please enter a valid email address.")
-                            else:
-                                with st.spinner(f"Sending email to {seller_name}..."):
-                                    ok, msg = send_seller_report_email(smtp_config, seller_name, recipient, info["df"], disc_df)
-                                    if ok:
-                                        st.success(f"Sent to {seller_name}!")
-                                    else:
-                                        st.error(msg)
-                                        
-                if send_all_btn:
-                    success_count = 0
-                    fail_count = 0
-                    progress_bar = st.progress(0)
-                    total_sellers = len(seller_groups)
-                    
-                    for i, (seller_name, info) in enumerate(seller_groups.items()):
-                        recipient = seller_email_inputs[seller_name]
-                        if not recipient:
-                            st.warning(f"Skipping {seller_name} - No email specified.")
-                            fail_count += 1
-                        else:
-                            ok, msg = send_seller_report_email(smtp_config, seller_name, recipient, info["df"], disc_df)
-                            if ok:
-                                success_count += 1
-                            else:
-                                st.error(f"Failed for {seller_name}: {msg}")
-                                fail_count += 1
-                        progress_bar.progress((i + 1) / total_sellers)
-                    
-                    st.success(f"Finished sending! Success: {success_count}, Failed/Skipped: {fail_count}")
         else:
             # Reconciliation Mode: Only display status discrepancies
             st.markdown("#### Validation Failures & Status Discrepancies")
