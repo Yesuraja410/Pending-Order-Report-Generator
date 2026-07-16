@@ -827,127 +827,74 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         "ref_date_dmy": ref_date_dmy
     }
 
-def extract_marketplace_order_info(row, columns):
-    # 1. Check Lazada
-    is_lazada = False
-    for col in columns:
-        col_lower = str(col).strip().lower()
-        if "lazada" in col_lower or "lazadasku" in col_lower or "lazada sku" in col_lower:
-            is_lazada = True
-            break
-            
-    if is_lazada:
+def detect_dataframe_channel(df):
+    columns = list(df.columns)
+    columns_lower = [str(c).strip().lower() for c in columns]
+    
+    # 1. Lazada check
+    if any("lazada" in c or "lazadasku" in c or "lazada sku" in c for c in columns_lower):
         country = "PH"
         for col in columns:
-            col_lower = str(col).strip().lower()
-            if "shippingcountry" in col_lower or "shipping country" in col_lower or "country" in col_lower:
-                val = str(row.get(col, "")).strip().upper()
-                if val:
-                    if "SINGAPORE" in val or val == "SG":
-                        country = "SG"
-                    elif "MALAYSIA" in val or val == "MY":
-                        country = "MY"
-                    elif "PHILIPPINES" in val or val == "PH":
-                        country = "PH"
-                    else:
-                        country = val
-                    break
-        channel_name = f"Lazada {country}"
-        
-        ord_no_col = None
-        for col in columns:
-            if str(col).strip().lower() == "ordernumber":
-                ord_no_col = col
+            if str(col).strip().lower() in ("shippingcountry", "shipping country", "country"):
+                for val in df[col].dropna():
+                    val_str = str(val).strip().upper()
+                    if val_str:
+                        if "SINGAPORE" in val_str or val_str == "SG":
+                            country = "SG"
+                        elif "MALAYSIA" in val_str or val_str == "MY":
+                            country = "MY"
+                        elif "PHILIPPINES" in val_str or val_str == "PH":
+                            country = "PH"
+                        else:
+                            country = val_str
+                        break
                 break
-        if not ord_no_col:
-            for col in columns:
-                if "ordernumber" in str(col).strip().lower() or "order number" in str(col).strip().lower():
-                    ord_no_col = col
-                    break
-        order_no = str(row.get(ord_no_col, "")).strip() if ord_no_col else ""
-        return channel_name, order_no
+        return f"Lazada {country}"
 
-    # 2. Check Shopee
-    is_shopee = False
-    for col in columns:
-        col_lower = str(col).strip().lower()
-        if "shopee rebate" in col_lower or "shopee_rebate" in col_lower:
-            is_shopee = True
-            break
-            
-    if is_shopee:
+    # 2. Shopee check
+    if any("shopee rebate" in c or "shopee_rebate" in c for c in columns_lower):
         country = "MY"
         for col in columns:
             if "php" in str(col).lower():
                 country = "PH"
                 break
         for col in columns:
-            col_lower = str(col).strip().lower()
-            if "country" in col_lower or "shipping country" in col_lower:
-                val = str(row.get(col, "")).strip().upper()
-                if val in ("SG", "MY", "PH"):
-                    country = val
-                    break
-        channel_name = f"Shopee {country}"
-        
-        ord_no_col = None
-        for col in columns:
-            if str(col).strip().lower() == "order id":
-                ord_no_col = col
+            if str(col).strip().lower() in ("country", "shipping country"):
+                for val in df[col].dropna():
+                    val_str = str(val).strip().upper()
+                    if val_str in ("SG", "MY", "PH"):
+                        country = val_str
+                        break
                 break
-        if not ord_no_col:
-            for col in columns:
-                if "order id" in str(col).strip().lower() or "order_id" in str(col).strip().lower() or "orderid" in str(col).strip().lower():
-                    ord_no_col = col
-                    break
-        order_no = str(row.get(ord_no_col, "")).strip() if ord_no_col else ""
-        return channel_name, order_no
+        return f"Shopee {country}"
 
-    # 3. Check Zalora
-    is_zalora = False
-    for col in columns:
-        col_lower = str(col).strip().lower()
-        if "zalora" in col_lower or "zalora sku" in col_lower or "zalorasku" in col_lower:
-            is_zalora = True
-            break
-            
-    if is_zalora:
+    # 3. Zalora check
+    if any("zalora" in c or "zalora sku" in c or "zalorasku" in c for c in columns_lower):
         country = "PH"
         for col in columns:
-            col_lower = str(col).strip().lower()
-            if "currency" in col_lower or "order currency" in col_lower:
-                val = str(row.get(col, "")).strip().upper()
-                if "SGD" in val:
-                    country = "SG"
-                elif "MYR" in val:
-                    country = "MY"
-                elif "PHP" in val:
-                    country = "PH"
+            if "currency" in str(col).lower() or "order currency" in str(col).lower():
+                for val in df[col].dropna():
+                    val_str = str(val).strip().upper()
+                    if "SGD" in val_str:
+                        country = "SG"
+                    elif "MYR" in val_str:
+                        country = "MY"
+                    elif "PHP" in val_str:
+                        country = "PH"
+                    break
                 break
         if country == "PH":
             for col in columns:
-                col_lower = str(col).strip().lower()
-                if "shipping country" in col_lower or "shippingcountry" in col_lower or "country" in col_lower:
-                    val = str(row.get(col, "")).strip().upper()
-                    if val in ("SG", "MY", "PH"):
-                        country = val
-                        break
-        channel_name = f"Zalora {country}"
-        
-        ord_no_col = None
-        for col in columns:
-            if str(col).strip().lower() == "order number":
-                ord_no_col = col
-                break
-        if not ord_no_col:
-            for col in columns:
-                if "order number" in str(col).strip().lower() or "ordernumber" in str(col).strip().lower():
-                    ord_no_col = col
+                if str(col).strip().lower() in ("shipping country", "shippingcountry", "country"):
+                    for val in df[col].dropna():
+                        val_str = str(val).strip().upper()
+                        if val_str in ("SG", "MY", "PH"):
+                            country = val_str
+                            break
                     break
-        order_no = str(row.get(ord_no_col, "")).strip() if ord_no_col else ""
-        return channel_name, order_no
+        return f"Zalora {country}"
 
-    # 4. Check TikTok MY (order length 18 digits)
+    # 4. TikTok check
     possible_id_cols = ["order id", "order_id", "orderid", "order number", "order_number", "ordernumber"]
     target_id_col = None
     for col in columns:
@@ -956,90 +903,140 @@ def extract_marketplace_order_info(row, columns):
             break
     if not target_id_col:
         for col in columns:
-            col_lower = str(col).strip().lower()
-            if "order" in col_lower or "id" in col_lower:
+            if "order" in str(col).lower() or "id" in str(col).lower():
                 target_id_col = col
                 break
-                
     if target_id_col:
-        val = str(row.get(target_id_col, "")).strip()
-        if len(val) == 18 and val.isdigit():
-            return "TikTok MY", val
+        for val in df[target_id_col].dropna().head(10):
+            val_str = str(val).strip()
+            if len(val_str) == 18 and val_str.isdigit():
+                return "TikTok MY"
 
-    # Default fallback using store name / nickname if available
+    # Default fallback
     store_col = None
     for col in columns:
-        col_lower = str(col).strip().lower()
-        if col_lower in ("nickname", "store name", "store", "seller", "seller name", "marketplace", "shop name", "shop"):
+        if str(col).strip().lower() in ("nickname", "store name", "store", "seller", "seller name", "marketplace", "shop name", "shop"):
             store_col = col
             break
-    
-    id_col = None
-    for col in columns:
-        col_lower = str(col).strip().lower()
-        if col_lower in ("order id", "order_id", "orderid", "order number", "order_number", "ordernumber"):
-            id_col = col
-            break
-    order_no = str(row.get(id_col, "")).strip() if id_col else ""
-    
     if store_col:
-        store_val = str(row.get(store_col, "")).strip()
-        if store_val and store_val != "Default Store":
-            c_code, chan = parse_country_and_channel(store_val)
-            return f"{chan} {c_code}", order_no
+        for val in df[store_col].dropna():
+            store_val = str(val).strip()
+            if store_val and store_val != "Default Store":
+                c_code, chan = parse_country_and_channel(store_val)
+                return f"{chan} {c_code}"
 
-    return "Marketplace Default", order_no
+    return "Marketplace Default"
+
+def resolve_marketplace_order_id_col(channel_name, columns):
+    chan_lower = channel_name.lower()
+    if "shopee" in chan_lower:
+        for col in columns:
+            if str(col).strip().lower() == "order id":
+                return col
+        for col in columns:
+            if "order id" in str(col).strip().lower() or "order_id" in str(col).strip().lower() or "orderid" in str(col).strip().lower():
+                return col
+    elif "lazada" in chan_lower:
+        for col in columns:
+            if str(col).strip().lower() == "ordernumber":
+                return col
+        for col in columns:
+            if "ordernumber" in str(col).strip().lower() or "order number" in str(col).strip().lower():
+                return col
+    elif "zalora" in chan_lower:
+        for col in columns:
+            if str(col).strip().lower() == "order number":
+                return col
+        for col in columns:
+            if "order number" in str(col).strip().lower() or "ordernumber" in str(col).strip().lower():
+                return col
+    elif "tiktok" in chan_lower:
+        for col in columns:
+            if str(col).strip().lower() == "order id":
+                return col
+        for col in columns:
+            if "order id" in str(col).strip().lower() or "order_id" in str(col).strip().lower() or "orderid" in str(col).strip().lower():
+                return col
+                
+    for name in ["order_id", "order_number", "order id", "order no", "order number", "order_no", "orderid"]:
+        for col in columns:
+            if str(col).strip().lower() == name:
+                return col
+    return columns[0] if len(columns) > 0 else None
+
+def load_and_preprocess_marketplace_files(marketplace_files):
+    if not isinstance(marketplace_files, list):
+        marketplace_files = [marketplace_files]
+        
+    processed_dfs = []
+    for f in marketplace_files:
+        sub_df = load_file_safely(f)
+        if sub_df.empty:
+            continue
+            
+        channel_detected = detect_dataframe_channel(sub_df)
+        ord_id_col = resolve_marketplace_order_id_col(channel_detected, sub_df.columns)
+        if not ord_id_col:
+            continue
+            
+        sku_col = _find_column(sub_df, ["custom_sku", "customSku", "sku", "item_sku", "SKU", "sellerSku", "seller SKU", "Zalora SKU"])
+        date_col = _find_column(sub_df, ["date", "created", "order_date", "Order Date", "timeOrderCreated", "Created at"])
+        
+        clean_rows = []
+        for idx, row in sub_df.iterrows():
+            raw_id = str(row.get(ord_id_col, "")).strip()
+            if not raw_id or raw_id.lower() in ("nan", "null", "none", "platform unique order id.", "order id", "order no"):
+                continue
+            if "tiktok" in channel_detected.lower():
+                if not (len(raw_id) == 18 and raw_id.isdigit()):
+                    continue
+                    
+            clean_id = _clean_order_id(raw_id)
+            sku_val = str(row.get(sku_col, "")).strip() if sku_col else ""
+            date_val = extract_date(row.get(date_col, "")) if date_col else "Unknown"
+            
+            clean_rows.append({
+                "Correct Order Number": clean_id,
+                "Store Name": channel_detected,
+                "SKU": sku_val,
+                "Order Date": date_val,
+                "Final Remarks": "",
+                "OMS Order Status": "N/A",
+                "SLA Source": "Marketplace Report",
+                "SLA": "",
+                "sla_status": ""
+            })
+            
+        if clean_rows:
+            processed_dfs.append(pd.DataFrame(clean_rows))
+            
+    if processed_dfs:
+        return pd.concat(processed_dfs, ignore_index=True)
+    else:
+        return pd.DataFrame(columns=["Correct Order Number", "Store Name", "SKU", "Order Date", "Final Remarks", "OMS Order Status", "SLA Source", "SLA", "sla_status"])
 
 def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
-    # Find ID and nickname/store column in both Reports
     tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-    mp_sku_col = _find_column(df_marketplace, ["custom_sku", "customSku", "sku", "item_sku", "SKU"])
-
     if not tc_id_col:
         raise KeyError(f"Could not find 'Order ID' column in TC Order Report. Available: {list(df_tc.columns)}")
 
     is_tiktok_ph = lambda x: str(x).strip().lower().replace(" ", "").replace("-", "").replace("_", "") == "tiktokph"
-    mp_store_col = _find_column(df_marketplace, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
-    if mp_store_col and mp_store_col in df_marketplace.columns:
-        df_marketplace = df_marketplace[~df_marketplace[mp_store_col].apply(is_tiktok_ph)].copy()
-        
     tc_store_col = _find_column(df_tc, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
     if tc_store_col and tc_store_col in df_tc.columns:
         df_tc = df_tc[~df_tc[tc_store_col].apply(is_tiktok_ph)].copy()
 
     df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
-
     tc_ids = set(df_tc[tc_id_col].dropna().astype(str).str.strip().tolist())
-
-    df_marketplace["Final Remarks"] = ""
-    df_marketplace["OMS Order Status"] = "N/A"
-    df_marketplace["SLA Source"] = "Marketplace Report"
-    df_marketplace["SLA"] = ""
-    
-    if "sla_status" not in df_marketplace.columns:
-        df_marketplace["sla_status"] = ""
-
-    target_store_col = mp_store_col if mp_store_col else "Store Name"
-    
-    # Resolve dynamic channel names and order numbers using extract_marketplace_order_info
-    resolved_channels = []
-    resolved_order_nos = []
-    for idx, row in df_marketplace.iterrows():
-        chan, ord_no = extract_marketplace_order_info(row, df_marketplace.columns)
-        resolved_channels.append(chan)
-        resolved_order_nos.append(_clean_order_id(ord_no))
-        
-    df_marketplace[target_store_col] = resolved_channels
-    df_marketplace["Correct Order Number"] = resolved_order_nos
 
     discrepancies = []
     reflected_count = 0
     missing_count = 0
+    target_store_col = "Store Name"
 
     for idx, row in df_marketplace.iterrows():
         order_id_str = str(row["Correct Order Number"]).strip()
-        store_val = _clean_str(row.get(target_store_col, ""))
-        sku_val = _clean_str(row.get(mp_sku_col, "")) if mp_sku_col else ""
+        store_val = str(row["Store Name"]).strip()
+        sku_val = str(row.get("SKU", "")).strip()
         
         if order_id_str in tc_ids:
             df_marketplace.at[idx, "Final Remarks"] = "Imported to TC"
@@ -1051,7 +1048,7 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             discrepancies.append({
                 "Order ID": order_id_str,
                 "Nickname": store_val,
-                "SKU": sku_val,
+                "Seller SKU": sku_val,
                 "Validation Result": "Order missing in TC",
                 "TC Order Status": "Missing",
                 "TC Item Status": "Missing",
@@ -1063,10 +1060,7 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
         "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
-    if not df_discrepancies.empty and "SKU" in df_discrepancies.columns:
-        df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
 
-    # Seller grouping
     seller_groups = {}
     stores = df_marketplace[target_store_col].unique()
     for store in stores:
@@ -1078,7 +1072,6 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             "email": ""
         }
 
-    # Country-specific reports
     country_reports = {}
     for country in ["SG", "MY", "PH"]:
         country_reports[country] = {
@@ -1087,20 +1080,14 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             "summary_df": pd.DataFrame()
         }
 
-    df_marketplace["Order Date"] = "Unknown"
-    mp_date_col = _find_column(df_marketplace, ["date", "created", "order_date", "Order Date", "timeOrderCreated"])
-    if mp_date_col:
-        df_marketplace["Order Date"] = df_marketplace[mp_date_col].apply(extract_date)
-
     for country in ["SG", "MY", "PH"]:
         c_rows = []
         for idx, row in df_marketplace.iterrows():
-            store_val = _clean_str(row[target_store_col])
-            c_code, chan = parse_country_and_channel(store_val)
-            if c_code == country:
+            store_val = str(row[target_store_col]).strip()
+            if store_val.endswith(country):
                 row_dict = row.to_dict()
                 row_dict["Country"] = country
-                row_dict["Channel"] = f"{chan} {country}"
+                row_dict["Channel"] = store_val
                 c_rows.append(row_dict)
                 
         country_df = pd.DataFrame(c_rows)
@@ -1114,7 +1101,6 @@ def run_tc_marketplace_reconciliation(df_tc, df_marketplace):
             )
             pivot_df.index.names = ["Channel", "OMS Order Status"]
             
-            # Drop columns representing blank/invalid SLA dates (including nan, nat, #N/A)
             cols_to_drop_pivot = [col for col in pivot_df.columns if str(col).lower().strip() in ("nan", "none", "nat", "null", "#n/a", "")]
             pivot_df = pivot_df.drop(columns=cols_to_drop_pivot, errors="ignore")
             
@@ -1659,16 +1645,9 @@ def process_and_validate_orders(pending_file, tc_file, *args, **kwargs):
     elif tc_file is not None:
         df_tc = load_file_safely(tc_file)
         
-    # Load Marketplace Reports
-    if isinstance(marketplace_file, list):
-        mp_dfs = []
-        for f in marketplace_file:
-            sub_df = load_file_safely(f)
-            if not sub_df.empty:
-                mp_dfs.append(sub_df)
-        df_marketplace = pd.concat(mp_dfs, ignore_index=True) if mp_dfs else pd.DataFrame()
-    elif marketplace_file is not None:
-        df_marketplace = load_file_safely(marketplace_file)
+    # Load Marketplace Reports using platform-specific rules
+    if marketplace_file is not None:
+        df_marketplace = load_and_preprocess_marketplace_files(marketplace_file)
         
     # Load OMS Report
     if isinstance(oms_file, list):
