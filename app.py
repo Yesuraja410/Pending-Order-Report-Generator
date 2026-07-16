@@ -151,12 +151,22 @@ else:
         seller_groups = st.session_state["order_groups"]
         country_reports = st.session_state.get("order_country_reports", {})
         
-        has_pending = not enriched_df.empty
-        is_reconciliation_mode = "all_imported_to_tc" in summary
+        mode = summary.get("mode", "standard")
+        has_pending = (mode not in ("tc_oms", "tc_marketplace"))
 
         # Display metrics
         st.markdown("### Key Metrics")
-        if is_reconciliation_mode:
+        if mode == "tc_oms":
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Number of Orders", summary["total_pending_orders"])
+            m2.metric("Reflecting in OMS", summary["pushed_count"])
+            m3.metric("Missing in OMS", summary["not_pushed_count"])
+            
+            if summary["all_imported_to_tc"]:
+                st.success("🎉 **All active TC orders are successfully verified in OMS!**")
+            else:
+                st.error(f"⚠️ **Found {summary['not_pushed_count']} status discrepancies between TC and OMS!**")
+        elif mode == "tc_marketplace":
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Marketplace Orders", summary["total_pending_orders"])
             m2.metric("Reflected in TC", summary["pushed_count"])
@@ -264,24 +274,42 @@ else:
             )
             st.markdown('</div>', unsafe_allow_html=True)
         else:
-            # Reconciliation Mode: Single styled Discrepancy Report download container
-            st.markdown('<div class="download-container">', unsafe_allow_html=True)
-            st.markdown('<h3 class="download-header">📥 Download Status Discrepancies Report (Styled)</h3>', unsafe_allow_html=True)
-            
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
-                excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
+            if mode == "tc_marketplace":
+                st.markdown('<div class="download-container">', unsafe_allow_html=True)
+                st.markdown('<h3 class="download-header">📥 Download Missing Orders Report (Styled)</h3>', unsafe_allow_html=True)
                 
-            st.download_button(
-                label="📥 Download Discrepancy Report",
-                data=excel_buffer.getvalue(),
-                file_name=f"Status Discrepancies Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="dl_discrepancies"
-            )
-            st.markdown('</div>', unsafe_allow_html=True)
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    enriched_df.to_excel(writer, sheet_name="Missing Orders", index=False)
+                    excel_formatter.format_data_sheet(writer.sheets["Missing Orders"], enriched_df)
+                    
+                st.download_button(
+                    label="📥 Download Missing Orders Report",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"Missing Orders Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_missing_orders"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="download-container">', unsafe_allow_html=True)
+                st.markdown('<h3 class="download-header">📥 Download Status Discrepancies Report (Styled)</h3>', unsafe_allow_html=True)
+                
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+                    excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
+                    
+                st.download_button(
+                    label="📥 Download Discrepancy Report",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"Status Discrepancies Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_discrepancies"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
         
         # Display layout of tables
         st.markdown("### Detailed Results")
@@ -425,11 +453,18 @@ else:
                                     except Exception as e:
                                         st.error(f"❌ An error occurred: {str(e)}")
         else:
-            # Reconciliation Mode: Only display status discrepancies
-            st.markdown("#### Validation Failures & Status Discrepancies")
-            if disc_df.empty:
-                st.success("No status discrepancies or validation failures identified!")
+            if mode == "tc_marketplace":
+                st.markdown("#### Missing Orders from TC")
+                if enriched_df.empty:
+                    st.success("🎉 All orders are successfully reflecting in TC!")
+                else:
+                    st.error(f"Found {len(enriched_df)} missing orders.")
+                    st.dataframe(enriched_df, use_container_width=True, hide_index=True)
             else:
-                st.warning(f"Found {len(disc_df)} discrepancies/warnings.")
-                st.dataframe(disc_df, use_container_width=True, hide_index=True)
+                st.markdown("#### Validation Failures & Status Discrepancies")
+                if disc_df.empty:
+                    st.success("No status discrepancies or validation failures identified!")
+                else:
+                    st.warning(f"Found {len(disc_df)} discrepancies/warnings.")
+                    st.dataframe(disc_df, use_container_width=True, hide_index=True)
 
