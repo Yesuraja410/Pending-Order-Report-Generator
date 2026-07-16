@@ -11,6 +11,7 @@ import excel_formatter
 
 def _smtp_connect_and_login(smtp_config):
     """Connect to SMTP server and perform login, forcing LOGIN/PLAIN to avoid auth negotiation loop."""
+    import base64
     host = smtp_config.get("host")
     port = int(smtp_config.get("port", 587))
     user = smtp_config.get("user")
@@ -25,15 +26,45 @@ def _smtp_connect_and_login(smtp_config):
     else:
         server = smtplib.SMTP_SSL(host, port, timeout=15)
         
-    # Force SMTP AUTH to basic LOGIN/PLAIN to avoid server negotiation loops (fixes infinite AUTH loops)
-    if hasattr(server, 'esmtp_features') and 'auth' in server.esmtp_features:
-        auth_methods = server.esmtp_features['auth'].split()
-        basic_auths = [m for m in auth_methods if m.upper() in ['LOGIN', 'PLAIN']]
-        if basic_auths:
-            server.esmtp_features['auth'] = ' '.join(basic_auths)
-            
-    server.login(user, password)
-    return server
+    # Perform manual custom login to prevent smtplib's infinite challenge-response negotiation loops
+    try:
+        # Initiate AUTH LOGIN
+        code, resp = server.docmd("AUTH", "LOGIN")
+        if code == 334:
+            # Send Base64 Username
+            user_b64 = base64.b64encode(user.encode('utf-8')).decode('utf-8')
+            code, resp = server.docmd(user_b64)
+            if code == 334:
+                # Send Base64 Password
+                pass_b64 = base64.b64encode(password.encode('utf-8')).decode('utf-8')
+                code, resp = server.docmd(pass_b64)
+                if code == 235:
+                    return server
+                else:
+                    raise smtplib.SMTPAuthenticationError(code, f"Authentication failed: {resp}")
+            else:
+                raise smtplib.SMTPAuthenticationError(code, f"Username rejected or failed: {resp}")
+        else:
+            # Fallback to standard login if AUTH LOGIN is not supported directly
+            server.login(user, password)
+            return server
+    except smtplib.SMTPAuthenticationError as e:
+        server.quit()
+        raise e
+    except Exception as e:
+        # Fallback to standard login
+        try:
+            # Force SMTP AUTH to basic LOGIN/PLAIN to avoid server negotiation loops (fixes infinite AUTH loops)
+            if hasattr(server, 'esmtp_features') and 'auth' in server.esmtp_features:
+                auth_methods = server.esmtp_features['auth'].split()
+                basic_auths = [m for m in auth_methods if m.upper() in ['LOGIN', 'PLAIN']]
+                if basic_auths:
+                    server.esmtp_features['auth'] = ' '.join(basic_auths)
+            server.login(user, password)
+            return server
+        except Exception as fallback_err:
+            server.quit()
+            raise fallback_err
 
 def test_smtp_connection(host, port, user, password, use_tls=True):
     """Test connection to the SMTP server."""
