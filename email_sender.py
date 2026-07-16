@@ -9,22 +9,39 @@ from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 import excel_formatter
 
+def _smtp_connect_and_login(smtp_config):
+    """Connect to SMTP server and perform login, forcing LOGIN/PLAIN to avoid auth negotiation loop."""
+    host = smtp_config.get("host")
+    port = int(smtp_config.get("port", 587))
+    user = smtp_config.get("user")
+    password = smtp_config.get("password")
+    use_tls = smtp_config.get("use_tls", True)
+    
+    if use_tls:
+        server = smtplib.SMTP(host, port, timeout=15)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+    else:
+        server = smtplib.SMTP_SSL(host, port, timeout=15)
+        
+    # Force SMTP AUTH to basic LOGIN/PLAIN to avoid server negotiation loops (fixes infinite AUTH loops)
+    if hasattr(server, 'esmtp_features') and 'auth' in server.esmtp_features:
+        auth_methods = server.esmtp_features['auth'].split()
+        basic_auths = [m for m in auth_methods if m.upper() in ['LOGIN', 'PLAIN']]
+        if basic_auths:
+            server.esmtp_features['auth'] = ' '.join(basic_auths)
+            
+    server.login(user, password)
+    return server
+
 def test_smtp_connection(host, port, user, password, use_tls=True):
     """Test connection to the SMTP server."""
     try:
         if not host or not user or not password:
             return False, "SMTP configuration details are incomplete."
-            
-        port = int(port)
-        if use_tls:
-            server = smtplib.SMTP(host, port, timeout=10)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-        else:
-            server = smtplib.SMTP_SSL(host, port, timeout=10)
-            
-        server.login(user, password)
+        cfg = {"host": host, "port": port, "user": user, "password": password, "use_tls": use_tls}
+        server = _smtp_connect_and_login(cfg)
         server.quit()
         return True, "Successfully connected to SMTP server!"
     except Exception as e:
@@ -196,22 +213,14 @@ def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_d
 
     # == 4. Send Email via SMTP ==============================================-
     try:
-        if use_tls:
-            server = smtplib.SMTP(host, port, timeout=15)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-        else:
-            server = smtplib.SMTP_SSL(host, port, timeout=15)
-            
-        server.login(user, password)
+        server = _smtp_connect_and_login(smtp_config)
         server.sendmail(sender_email, recipient_email, msg.as_string())
         server.quit()
         return True, "Email sent successfully!"
     except Exception as e:
         return False, f"Failed to send email: {str(e)}"
 
-def send_country_report_email(smtp_config, country, to_email, cc_email, excel_bytes, ref_date_str):
+def send_country_report_email(smtp_config, country, to_email, cc_email, excel_bytes, ref_date_str, urgent_orders_df=None):
     """
     Send the country-specific Excel report to the seller via SMTP.
     """
@@ -236,7 +245,41 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     subject = f"PUMA {country} - Pending Order & SLA Report ({date_suffix})"
     filename = f"Pending_order_report_-_PUMA_{country}_{date_suffix}.xlsx"
 
-    # Build nice HTML email body
+    # Build urgent orders table preview HTML
+    table_html = ""
+    if urgent_orders_df is not None and not urgent_orders_df.empty:
+        # Find column matches
+        id_col = next((c for c in urgent_orders_df.columns if "order" in c.lower() or "id" in c.lower()), urgent_orders_df.columns[0])
+        store_col = next((c for c in urgent_orders_df.columns if "store" in c.lower() or "seller" in c.lower() or "nickname" in c.lower()), "")
+        sla_col = next((c for c in urgent_orders_df.columns if "sla" in c.lower() or "date" in c.lower() or "deadline" in c.lower()), "")
+        oms_col = next((c for c in urgent_orders_df.columns if "oms" in c.lower() or "status" in c.lower()), "")
+        rem_col = next((c for c in urgent_orders_df.columns if "remark" in c.lower() or "final" in c.lower()), "")
+        
+        cols_to_preview = [id_col]
+        if store_col: cols_to_preview.append(store_col)
+        if sla_col: cols_to_preview.append(sla_col)
+        if oms_col: cols_to_preview.append(oms_col)
+        if rem_col: cols_to_preview.append(rem_col)
+        
+        # Filter for Breached or Today first
+        if "sla_status" in urgent_orders_df.columns:
+            sub_df = urgent_orders_df[urgent_orders_df["sla_status"].astype(str).str.lower().isin(["breached", "today"])].copy()
+            if sub_df.empty:
+                sub_df = urgent_orders_df.head(10).copy()
+        else:
+            sub_df = urgent_orders_df.head(10).copy()
+            
+        preview_df = sub_df[cols_to_preview].copy()
+        col_names_map = {id_col: "Order ID"}
+        if store_col: col_names_map[store_col] = "Store"
+        if sla_col: col_names_map[sla_col] = "SLA Deadline"
+        if oms_col: col_names_map[oms_col] = "OMS Status"
+        if rem_col: col_names_map[rem_col] = "Remarks"
+        preview_df = preview_df.rename(columns=col_names_map)
+        
+        table_html = preview_df.to_html(classes="table", index=False, border=0)
+
+    # Build HTML email body matching user requirements
     email_html = f"""
     <html>
     <head>
@@ -249,7 +292,7 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
                 padding: 20px;
             }}
             .container {{
-                max-width: 700px;
+                max-width: 750px;
                 background-color: #ffffff;
                 border: 1px solid #e0e0e0;
                 border-radius: 8px;
@@ -265,7 +308,26 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
             .header h2 {{
                 color: #BA0C2F;
                 margin: 0;
-                font-size: 24px;
+                font-size: 22px;
+            }}
+            .table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 15px;
+                margin-bottom: 20px;
+                font-size: 13px;
+            }}
+            .table th {{
+                background-color: #f2f2f2;
+                color: #444444;
+                font-weight: bold;
+                text-align: left;
+                padding: 10px;
+                border: 1px solid #dddddd;
+            }}
+            .table td {{
+                padding: 10px;
+                border: 1px solid #eeeeee;
             }}
             .footer {{
                 font-size: 12px;
@@ -283,13 +345,14 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
                 <p style="margin: 5px 0 0 0; color: #666666;">Date: <strong>{date_suffix}</strong></p>
             </div>
             
-            <p>Dear Seller Partner,</p>
-            <p>Please find attached the daily Pending Order and SLA Status validation report for <strong>PUMA {country}</strong>. Kindly review the details to ensure prompt fulfillment and address any status mismatches highlighted.</p>
+            <p>Hi Ops Team,</p>
+            <p>find the attached Pending Orders Report. Kindly ensure all orders are processed and shipped on time to avoid any cancellations.</p>
             
-            <p>The complete report with all order statuses and validation checks has been attached to this email as an Excel spreadsheet.</p>
+            <p>Below are orders that require immediate attention:</p>
+            {table_html}
 
-            <p style="font-size: 14px;">Best regards,<br>
-            <strong>Operations & Analytics Team</strong></p>
+            <p style="margin-top: 25px;">Thanks & Regards,<br>
+            <strong>Graas Team</strong></p>
             
             <div class="footer">
                 This is an automated report. Please do not reply directly to this email.
@@ -318,17 +381,76 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     msg.attach(attachment)
 
     try:
-        if use_tls:
-            server = smtplib.SMTP(host, port, timeout=15)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-        else:
-            server = smtplib.SMTP_SSL(host, port, timeout=15)
-            
-        server.login(user, password)
+        server = _smtp_connect_and_login(smtp_config)
         server.sendmail(sender_email, recipients, msg.as_string())
         server.quit()
         return True, f"Report email for PUMA {country} sent successfully!"
     except Exception as e:
         return False, f"Failed to send email: {str(e)}"
+
+def send_discrepancies_to_slack_email(smtp_config, discrepancies_df, ref_date_str):
+    """
+    Send the status discrepancies Excel report to the Slack channel email integration address.
+    """
+    import smtplib
+    import io
+    from datetime import datetime
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+    import pandas as pd
+    import excel_formatter
+
+    if discrepancies_df.empty:
+        return True, "No discrepancies found today to send to Slack."
+
+    slack_email = "order-related-issues-aaaausyacvowbr5tw6wbivuota@graas-talk.slack.com"
+    
+    host = smtp_config.get("host")
+    port = int(smtp_config.get("port", 587))
+    user = smtp_config.get("user")
+    password = smtp_config.get("password")
+    use_tls = smtp_config.get("use_tls", True)
+    sender_email = smtp_config.get("sender_email", user)
+
+    date_suffix = ref_date_str if ref_date_str else datetime.today().strftime('%d-%m-%Y')
+    subject = f"Status Discrepancies Report - {date_suffix}"
+    
+    # Generate Excel in memory
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        discrepancies_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+        excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], discrepancies_df)
+    excel_bytes = excel_buffer.getvalue()
+
+    total_discrepancies = len(discrepancies_df)
+    
+    # HTML body for Slack integration
+    email_html = f"""
+    <html>
+    <body>
+        <h3>Daily Status Discrepancies Report ({date_suffix})</h3>
+        <p>Total Discrepancies Found: <strong>{total_discrepancies}</strong></p>
+        <p>Please find attached the detailed Excel status discrepancies sheet.</p>
+    </body>
+    </html>
+    """
+
+    msg = MIMEMultipart()
+    msg["From"] = f"Operations Team <{sender_email}>"
+    msg["To"] = slack_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(email_html, "html"))
+
+    # Attach Excel
+    attachment = MIMEApplication(excel_bytes, _subtype="xlsx")
+    attachment.add_header("Content-Disposition", "attachment", filename=f"Status_Discrepancies_{date_suffix}.xlsx")
+    msg.attach(attachment)
+
+    try:
+        server = _smtp_connect_and_login(smtp_config)
+        server.sendmail(sender_email, [slack_email], msg.as_string())
+        server.quit()
+        return True, "Discrepancies report shared successfully to Slack group!"
+    except Exception as e:
+        return False, f"Failed to share to Slack: {str(e)}"
