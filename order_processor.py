@@ -510,6 +510,10 @@ def run_gsheet_oms_validation(df_pending, df_oms):
     # Check what status column GSheet has for orders
     pend_status_col = _find_column(df_pending, ["order_status", "status", "Item Status", "orderItems.orderStatus", "TC Status"])
     pend_sku_col = _find_column(df_pending, ["seller_sku", "sellerSku", "Seller SKU", "SellerSKU", "custom_sku", "customSku", "sku", "item_sku", "SKU", "orderItems.customSKU"])
+    
+    # Check if there is an order number column and/or oms_pushed column in df_pending
+    pend_num_col = _find_column(df_pending, ["order_number", "Order Number", "Order_No", "Correct Order Number"])
+    oms_pushed_col = _find_column(df_pending, ["oms_pushed", "omsPushed", "OMS Pushed", "OMS_pushed"])
 
     for idx, row in df_pending.iterrows():
         order_id = row[pend_id_col]
@@ -517,6 +521,10 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         store_val = _clean_str(row.get(target_store_col, ""))
         sku_val = normalize_ean(row.get(pend_sku_col)) if pend_sku_col else ""
         key = order_id_str + sku_val
+        
+        # Resolve order number for Zalora matching
+        ord_num = _clean_order_id(row.get(pend_num_col)) if pend_num_col else ""
+        match_id = ord_num if ord_num else order_id_str
         
         is_gsheet_cancelled = False
         if pend_status_col:
@@ -528,18 +536,26 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         is_in_oms = False
         oms_stat = ""
         
-        if order_id_str:
-            if key in oms_status_map:
-                is_in_oms = True
-                oms_stat = oms_status_map[key]
-            elif order_id_str in oms_order_status_fallback_map:
-                is_in_oms = True
-                oms_stat = oms_order_status_fallback_map[order_id_str]
-                
+        # Match using order number + SKU, order ID + SKU, or fallback order number/ID
+        if match_id and (match_id + sku_val) in oms_status_map:
+            is_in_oms = True
+            oms_stat = oms_status_map[match_id + sku_val]
+        elif key in oms_status_map:
+            is_in_oms = True
+            oms_stat = oms_status_map[key]
+        elif match_id and match_id in oms_order_status_fallback_map:
+            is_in_oms = True
+            oms_stat = oms_order_status_fallback_map[match_id]
+        elif order_id_str and order_id_str in oms_order_status_fallback_map:
+            is_in_oms = True
+            oms_stat = oms_order_status_fallback_map[order_id_str]
+            
         if is_in_oms:
             df_pending.at[idx, "OMS Order Status"] = oms_stat
             df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
             pushed_count += 1
+            if oms_pushed_col:
+                df_pending.at[idx, oms_pushed_col] = "Pushed"
             
             if pend_status_col:
                 pend_stat_raw = _clean_str(row.get(pend_status_col, ""))
@@ -641,6 +657,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "Details": f"Pending status is Delivery Failed, but OMS status is '{oms_stat}'."
                         })
         else:
+            if oms_pushed_col:
+                df_pending.at[idx, oms_pushed_col] = "Not Pushed"
             if is_gsheet_cancelled:
                 # Rule 1 exception: If TC status cancelled and OMS order not found, ignore!
                 df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
@@ -1156,6 +1174,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         target_store_col = pend_store_col if pend_store_col else "Store Name"
         if target_store_col not in df_pending.columns:
             df_pending[target_store_col] = "Default Store"
+        oms_pushed_col = _find_column(df_pending, ["oms_pushed", "omsPushed", "OMS Pushed", "OMS_pushed"])
     
     # TC Report columns (All file)
     tc_id_col = _find_column(df_tc, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
@@ -1334,11 +1353,12 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             pend_sku_val = ""
             if pend_sku_col and pend_sku_col in row:
                 pend_sku_val = row.get(pend_sku_col, "")
-                
             if not is_in_tc:
                 # Flag missing in TC
                 df_pending.at[idx, "Final Remarks"] = "Order missing in TC"
                 df_pending.at[idx, "OMS Order Status"] = oms_stat if is_in_oms else "Not in OMS"
+                if oms_pushed_col:
+                    df_pending.at[idx, oms_pushed_col] = "Pushed" if is_in_oms else "Not Pushed"
                 
                 # Append to discrepancy list
                 store_val = _clean_str(row.get(target_store_col, ""))
@@ -1358,8 +1378,12 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                     df_pending.at[idx, "OMS Order Status"] = oms_stat
                     df_pending.at[idx, "Final Remarks"] = "Successfully Pushed to OMS"
                     pushed_count += 1
+                    if oms_pushed_col:
+                        df_pending.at[idx, oms_pushed_col] = "Pushed"
                 else:
                     df_pending.at[idx, "OMS Order Status"] = "Not in OMS"
+                    if oms_pushed_col:
+                        df_pending.at[idx, oms_pushed_col] = "Not Pushed"
                     
                     # Retrieve payment status & method from TC (All file) as fallback
                     pay_status = _clean_str(tc_payment_status.get(order_id, ""))
@@ -1442,14 +1466,18 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         item_status = _clean_str(row[tc_item_status_col]) if tc_item_status_col else ""
         order_status = _clean_str(row[tc_status_col]) if tc_status_col else ""
         if oid:
-            key = oid + sku_norm
-            tc_lookup[key] = {
+            val_dict = {
                 "Order ID": oid,
                 "SKU": sku,
                 "Item Status": item_status,
                 "Order Status": order_status,
                 "Row": row.to_dict()
             }
+            tc_lookup[oid + sku_norm] = val_dict
+            if tc_num_col:
+                onum = _clean_order_id(row[tc_num_col])
+                if onum and onum != oid:
+                    tc_lookup[onum + sku_norm] = val_dict
 
     oms_lookup = {}
     for _, row in df_oms.iterrows():
@@ -1459,15 +1487,17 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         ean_norm = normalize_ean(ean)
         line_status = _clean_str(row[oms_line_status_col]) if oms_line_status_col else ""
         order_status = _clean_str(row[oms_status_col]) if oms_status_col else ""
-        if oid:
-            key = oid + ean_norm
-            oms_lookup[key] = {
+        if oid_raw:
+            val_dict = {
                 "Order ID": oid,
                 "SKU": ean,
                 "Line Status": line_status,
                 "Order Status": order_status,
                 "Row": row.to_dict()
             }
+            oms_lookup[oid_raw + ean_norm] = val_dict
+            if oid and oid != oid_raw:
+                oms_lookup[oid + ean_norm] = val_dict
 
     all_keys = set(tc_lookup.keys()) & set(oms_lookup.keys()) # intersect line item keys
     discrepancies = []
