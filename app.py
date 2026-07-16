@@ -297,6 +297,52 @@ else:
                     with st.expander(f"View Raw Data ({country_sel})"):
                         st.dataframe(c_raw, use_container_width=True, hide_index=True)
                         
+                    # 4. Email Sending Section
+                    st.markdown("---")
+                    st.markdown("##### 📧 Share Country Report with Seller Partner")
+                    with st.expander(f"Send {country_sel} Report via Email", expanded=False):
+                        to_val = st.text_input("To:", value="yesuraja@graas.ai", key=f"to_{country_sel}")
+                        cc_val = st.text_input("Cc:", value="sudharsan.s@graas.ai", key=f"cc_{country_sel}")
+                        
+                        if st.button("Send Report", key=f"send_country_btn_{country_sel}", type="primary", use_container_width=True):
+                            # Load SMTP config
+                            smtp_config = st.session_state.get("smtp_config", {})
+                            if not smtp_config or not smtp_config.get("host"):
+                                import json
+                                try:
+                                    with open("config.json", "r") as config_file:
+                                        cfg = json.load(config_file)
+                                        smtp_config = cfg.get("smtp_config", {})
+                                except Exception:
+                                    pass
+                            
+                            if not smtp_config or not smtp_config.get("host"):
+                                st.error("❌ SMTP config not found. Please configure the SMTP Email details in the 'Email Setup' tab.")
+                            else:
+                                with st.spinner(f"Generating and sending PUMA {country_sel} report..."):
+                                    try:
+                                        import io
+                                        wb_to_send = excel_formatter.generate_excel_workbook(country_sel, c_raw, c_pivot, c_summary, ref_date_dmy)
+                                        c_buf = io.BytesIO()
+                                        wb_to_send.save(c_buf)
+                                        excel_bytes = c_buf.getvalue()
+                                        
+                                        from email_sender import send_country_report_email
+                                        success, msg = send_country_report_email(
+                                            smtp_config=smtp_config,
+                                            country=country_sel,
+                                            to_email=to_val,
+                                            cc_email=cc_val,
+                                            excel_bytes=excel_bytes,
+                                            ref_date_str=ref_date_dmy
+                                        )
+                                        if success:
+                                            st.success(f"✅ {msg}")
+                                        else:
+                                            st.error(f"❌ {msg}")
+                                    except Exception as e:
+                                        st.error(f"❌ An error occurred: {str(e)}")
+                        
             with sub_tab3:
                 st.markdown("#### SMTP Email Configuration")
                 # Load credentials from secrets or default to empty
