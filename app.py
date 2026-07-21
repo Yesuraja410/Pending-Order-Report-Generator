@@ -161,7 +161,7 @@ else:
         country_reports = st.session_state.get("order_country_reports", {})
         
         mode = summary.get("mode", "standard")
-        has_pending = (mode not in ("tc_oms", "tc_marketplace"))
+        has_pending = (mode != "tc_marketplace")
 
         # Display metrics
         st.markdown("### Key Metrics")
