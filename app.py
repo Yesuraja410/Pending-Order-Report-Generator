@@ -49,7 +49,11 @@ with st.sidebar:
     order_tc = st.file_uploader("2. TC Order Report", type=["xlsx","xls","csv"], key="order_tc")
     marketplace_reports = st.file_uploader("3. Market Place Reports (Multiple Upload)", type=["xlsx","xls","csv"], accept_multiple_files=True, key="marketplace_reports")
     order_oms = st.file_uploader("4. OMS Report (Sales Order file)", type=["xlsx","xls","csv"], key="order_oms")
-    
+
+    st.markdown("**5. Seller Contacts (optional)**")
+    st.caption("CSV/Excel with a Seller Name column and an Email column - used to auto-fill and auto-send each seller's report.")
+    contacts_file_upload = st.file_uploader("Upload Seller Contacts File", type=["xlsx","xls","csv"], key="contacts_file_upload")
+
     st.markdown("---")
     run_btn = st.button("Run Order Validation", use_container_width=True, type="primary")
 
@@ -108,7 +112,7 @@ else:
                     tc_file=order_tc,
                     marketplace_file=marketplace_reports,
                     oms_file=order_oms,
-                    contacts_file=None
+                    contacts_file=contacts_file_upload
                 )
                 st.session_state["order_enriched_df"] = res["enriched_pending_df"]
                 st.session_state["order_disc_df"] = res["discrepancies_df"]
@@ -220,8 +224,11 @@ else:
                       delta_color="inverse")
         
         # Render Downloads & Detailed Results based on mode
-        if mode in ("gsheet_oms", "pending_creation", "full"):
-            # Mode 1 & Mode 5: Pending Order Creation (File 1 + File 4, or File 1 + 2 + 4)
+        if mode == "gsheet_oms":
+            # Mode 1 ONLY: Pending Order Creation (File 1 + File 4).
+            # This country-wise report / email center section is intentionally
+            # NOT shown for any other mode (Market Place Order Check, Order
+            # Status Reconciliation, Order Flow Check, or Full Validation).
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Country SLA & Pivot Reports (Styled)</h3>', unsafe_allow_html=True)
             
@@ -301,7 +308,7 @@ else:
             sub_tab1, sub_tab2, sub_tab3 = st.tabs([
                 "SLA Report", 
                 "Status Discrepancies", 
-                "Country Reports & Email Center"
+                "Seller Grouping & Email Center"
             ])
             
             with sub_tab1:
@@ -367,68 +374,85 @@ else:
                 }
                 
                 st.markdown("---")
-                st.markdown("#### Country Pivot Summary & Email sharing")
-                country_sel = st.selectbox("Select Country", ["SG", "MY", "PH"])
-                
-                c_data = country_reports.get(country_sel, {})
-                c_summary = c_data.get("summary_df", pd.DataFrame())
-                c_pivot = c_data.get("pivot_df", pd.DataFrame())
-                c_raw = c_data.get("raw_df", pd.DataFrame())
-                
-                if c_summary.empty and c_pivot.empty:
-                    st.info(f"No order data found for country {country_sel}.")
+                st.markdown("#### 📧 Seller Grouping & Email Center")
+
+                if not seller_groups:
+                    st.info("No seller/store groups found in the Pending Order Report.")
                 else:
-                    st.markdown(f"##### Highlight Metrics for {country_sel}")
-                    metrics_dict = c_summary.set_index("Metric")["Count"].to_dict() if not c_summary.empty else {}
-                    
-                    c1, c2, c3, c4, c5, c6 = st.columns(6)
-                    c1.metric("Overdue (SLA breached)", metrics_dict.get("Overdue (SLA breached)", 0), delta="Breached" if metrics_dict.get("Overdue (SLA breached)", 0) > 0 else None, delta_color="inverse")
-                    c2.metric("Handover Today (Today SLA)", metrics_dict.get("Handover today (Today SLA)", 0))
-                    c3.metric("Order Status at New", metrics_dict.get("Order Status at New", 0))
-                    c4.metric("Within SLA (Future)", metrics_dict.get("Within SLA (Future)", 0))
-                    c5.metric("Not reflecting in OM", metrics_dict.get("Not reflecting in OM", 0))
-                    c6.metric("Unpaid Orders", metrics_dict.get("Unpaid Orders", 0))
-                    
-                    st.markdown(f"##### Pivot Table: Channel & OMS Status vs Dates ({country_sel})")
-                    st.dataframe(c_pivot, use_container_width=True, hide_index=True)
-                    
-                    with st.expander(f"View Raw Data ({country_sel})"):
-                        st.dataframe(c_raw, use_container_width=True, hide_index=True)
-                        
+                    st.caption(
+                        "Emails are auto-filled from the uploaded Seller Contacts file (Sidebar item 5) "
+                        "when a match is found. You can override any email below before sending."
+                    )
+
+                    # -- Bulk send: automatically emails every seller that has --
+                    # -- a valid, non-empty email address in one click. --------
+                    sellers_with_email = [
+                        s for s, g in seller_groups.items()
+                        if st.session_state.get(f"seller_email_{s}", g.get("email", "")).strip()
+                    ]
+                    st.markdown(
+                        f"**{len(sellers_with_email)} of {len(seller_groups)} sellers** currently have an email on file."
+                    )
+                    send_all_clicked = st.button(
+                        "📤 Send Report to All Sellers With an Email",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=(len(sellers_with_email) == 0)
+                    )
+                    if send_all_clicked:
+                        if not smtp_config.get("host"):
+                            st.error("❌ SMTP config not found. Please configure the SMTP Email details above first.")
+                        else:
+                            sent_ok, sent_fail = 0, 0
+                            with st.spinner(f"Sending reports to {len(sellers_with_email)} sellers..."):
+                                for s_name in sellers_with_email:
+                                    s_group = seller_groups[s_name]
+                                    s_email = st.session_state.get(f"seller_email_{s_name}", s_group.get("email", "")).strip()
+                                    ok, msg = send_seller_report_email(
+                                        smtp_config=smtp_config,
+                                        seller_name=s_name,
+                                        recipient_email=s_email,
+                                        seller_df=s_group["df"],
+                                        discrepancies_df=disc_df
+                                    )
+                                    if ok:
+                                        sent_ok += 1
+                                    else:
+                                        sent_fail += 1
+                                        st.warning(f"⚠️ {s_name}: {msg}")
+                            if sent_ok:
+                                st.success(f"✅ Sent {sent_ok} seller report(s) successfully.")
+                            if sent_fail:
+                                st.error(f"❌ {sent_fail} report(s) failed to send - see warnings above.")
+
                     st.markdown("---")
-                    st.markdown("##### 📧 Share Country Report with Seller Partner")
-                    with st.expander(f"Send {country_sel} Report via Email", expanded=False):
-                        to_val = st.text_input("To:", value="sudharsan.s@graas.ai", key=f"to_{country_sel}")
-                        cc_val = st.text_input("Cc:", value="yesuraja@graas.ai", key=f"cc_{country_sel}")
-                        
-                        if st.button("Send Report", key=f"send_country_btn_{country_sel}", type="primary", use_container_width=True):
-                            if not smtp_config.get("host"):
-                                st.error("❌ SMTP config not found. Please configure the SMTP Email details in the setup section above.")
-                            else:
-                                with st.spinner(f"Generating and sending PUMA {country_sel} report..."):
-                                    try:
-                                        import io
-                                        wb_to_send = excel_formatter.generate_excel_workbook(country_sel, c_raw, c_pivot, c_summary, ref_date_dmy)
-                                        c_buf = io.BytesIO()
-                                        wb_to_send.save(c_buf)
-                                        excel_bytes = c_buf.getvalue()
-                                        
-                                        from email_sender import send_country_report_email
-                                        success, msg = send_country_report_email(
+                    st.markdown("##### Individual Sellers")
+                    for s_name, s_group in seller_groups.items():
+                        s_df = s_group["df"]
+                        with st.expander(f"{s_name}  ({len(s_df)} orders)", expanded=False):
+                            st.dataframe(s_df, use_container_width=True, hide_index=True)
+                            email_key = f"seller_email_{s_name}"
+                            email_val = st.text_input(
+                                "Seller Email:",
+                                value=s_group.get("email", ""),
+                                key=email_key
+                            )
+                            if st.button("Send Report", key=f"send_seller_btn_{s_name}", use_container_width=True):
+                                if not smtp_config.get("host"):
+                                    st.error("❌ SMTP config not found. Please configure the SMTP Email details above first.")
+                                else:
+                                    with st.spinner(f"Sending report to {s_name}..."):
+                                        ok, msg = send_seller_report_email(
                                             smtp_config=smtp_config,
-                                            country=country_sel,
-                                            to_email=to_val,
-                                            cc_email=cc_val,
-                                            excel_bytes=excel_bytes,
-                                            ref_date_str=ref_date_dmy,
-                                            urgent_orders_df=c_raw
+                                            seller_name=s_name,
+                                            recipient_email=email_val,
+                                            seller_df=s_df,
+                                            discrepancies_df=disc_df
                                         )
-                                        if success:
+                                        if ok:
                                             st.success(f"✅ {msg}")
                                         else:
                                             st.error(f"❌ {msg}")
-                                    except Exception as e:
-                                        st.error(f"❌ An error occurred: {str(e)}")
 
         elif mode == "tc_marketplace":
             # Mode 2: Market Place Order Check (File 2 + File 3)
