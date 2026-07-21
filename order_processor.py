@@ -1248,7 +1248,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 tc_id_to_num[oid] = onum
                 tc_num_to_id[onum] = oid
 
-    # Build OMS status and payment lookup maps
+    # Build OMS status and payment lookup maps with concatenated Order ID + SKU keys
     oms_status_map = {}
     oms_order_status_fallback_map = {}
     oms_pay_status_map = {}
@@ -1259,9 +1259,14 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             if not oid:
                 continue
             ean = normalize_ean(row.get(oms_ean_col)) if oms_ean_col else ""
-            key = oid + ean
+            sku_raw = _clean_str(row.get(oms_ean_col, "")).lower() if oms_ean_col else ""
             stat_val = _clean_str(row.get(oms_status_col, "")) if oms_status_col else ""
-            oms_status_map[key] = stat_val
+            
+            if ean:
+                oms_status_map[oid + ean] = stat_val
+            if sku_raw:
+                oms_status_map[oid + sku_raw] = stat_val
+                
             oms_order_status_fallback_map[oid] = stat_val
             if oms_pay_status_col:
                 oms_pay_status_map[oid] = _clean_str(row.get(oms_pay_status_col, ""))
@@ -1271,11 +1276,50 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     ref_date_str = datetime.today().strftime('%d-%m-%Y')
     tc_active_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
 
-    # Process all rows from df_tc for complete status reconciliation
-    tc_rows = [row for _, row in df_tc.iterrows()]
-
     main_rows = []
     discrepancy_rows = []
+
+    # Mode 4 Check: If Marketplace reports are uploaded alongside TC and OMS (Order Flow Check)
+    mode_name = "order_status_reconciliation"
+    if df_marketplace is not None and not df_marketplace.empty:
+        mode_name = "order_flow_check"
+        tc_ids = set()
+        if not df_tc.empty and tc_id_col:
+            tc_ids.update(df_tc[tc_id_col].dropna().astype(str).str.strip().tolist())
+        if not df_tc.empty and tc_num_col:
+            tc_ids.update(df_tc[tc_num_col].dropna().astype(str).str.strip().tolist())
+            
+        for idx, mp_row in df_marketplace.iterrows():
+            mp_oid = str(mp_row.get("Correct Order Number", "")).strip()
+            if not mp_oid:
+                continue
+            mp_store = str(mp_row.get("Store Name", "")).strip()
+            mp_sku = str(mp_row.get("SKU", "")).strip()
+            
+            if mp_oid not in tc_ids:
+                flow_disc = {
+                    "Order ID": mp_oid,
+                    "Store Name": mp_store,
+                    "Seller SKU": mp_sku,
+                    "TC Order Status": "Missing in TC",
+                    "TC Item Status": "Missing in TC",
+                    "Payment Status": "N/A",
+                    "Payment Method": "N/A",
+                    "SLA Date": "Unknown",
+                    "SLA": "Unknown",
+                    "sla_status": "Unknown",
+                    "OMS Order Status": "N/A",
+                    "Validation Result": "Order missing in TC",
+                    "Details": "Order is present in Marketplace reports but completely missing from TC Order Report.",
+                    "Final Remarks": "Order missing in TC",
+                    "Correct Order Number": mp_oid,
+                    "SLA Source": "Marketplace Report"
+                }
+                main_rows.append(flow_disc)
+                discrepancy_rows.append(flow_disc)
+
+    # Process all rows from df_tc for complete status reconciliation
+    tc_rows = [row for _, row in df_tc.iterrows()]
 
     for row in tc_rows:
         oid_str = _clean_order_id(row.get(tc_id_col, ""))
@@ -1289,6 +1333,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
 
         sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col else ""
         ean_val = normalize_ean(sku_val)
+        sku_raw_val = sku_val.lower()
         
         pay_stat = _clean_str(row.get(tc_pay_status_col, "")) if tc_pay_status_col else ""
         pay_meth = _clean_str(row.get(tc_pay_method_col, "")) if tc_pay_method_col else ""
@@ -1298,16 +1343,22 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             pay_meth = oms_pay_method_map[oid_str]
 
         oms_stat = ""
-        key1 = oid_str + ean_val
+        key1 = oid_str + ean_val if ean_val else ""
+        key2 = oid_str + sku_raw_val if sku_raw_val else ""
         onum = tc_id_to_num.get(oid_str, "")
-        key3 = onum + ean_val if onum else ""
+        key3 = onum + ean_val if onum and ean_val else ""
+        key4 = onum + sku_raw_val if onum and sku_raw_val else ""
         
-        if key1 in oms_status_map:
+        if key1 and key1 in oms_status_map:
             oms_stat = oms_status_map[key1]
+        elif key2 and key2 in oms_status_map:
+            oms_stat = oms_status_map[key2]
         elif oid_str in oms_order_status_fallback_map:
             oms_stat = oms_order_status_fallback_map[oid_str]
         elif key3 and key3 in oms_status_map:
             oms_stat = oms_status_map[key3]
+        elif key4 and key4 in oms_status_map:
+            oms_stat = oms_status_map[key4]
         elif onum and onum in oms_order_status_fallback_map:
             oms_stat = oms_order_status_fallback_map[onum]
 
@@ -1432,6 +1483,27 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     
     target_store_col = "Store Name"
     total_discrepancies = len(df_discrepancies)
+
+    seller_groups = {}
+    country_reports = {}
+
+    reflected_count = len(main_df) - total_discrepancies
+    missing_count = total_discrepancies
+
+    summary = {
+        "total_pending_orders": len(main_df),
+        "enriched_sla_count": len(main_df),
+        "blank_sla_not_found": 0,
+        "total_discrepancies": total_discrepancies,
+        "cancelled_mismatches": len([r for r in main_rows if "Cancelled" in r["Validation Result"]]),
+        "packed_mismatches": len([r for r in main_rows if "Packed" in r["Validation Result"]]),
+        "pushed_count": reflected_count,
+        "not_pushed_count": missing_count,
+        "unpaid_count": 0,
+        "total_sellers": len(seller_groups),
+        "all_imported_to_tc": (total_discrepancies == 0),
+        "mode": mode_name
+    }
 
     # Build seller groupings
     seller_groups = {}
