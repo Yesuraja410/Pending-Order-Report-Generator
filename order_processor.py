@@ -1188,6 +1188,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     tc_item_status_col = _find_column(df_tc, ["order_item_status", "item_status", "line_item_status", "order_status"])
     tc_store_col = _find_column(df_tc, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
     tc_sku_col = _find_column(df_tc, ["seller_sku", "sellerSku", "Seller SKU", "SellerSKU", "custom_sku", "customSku", "sku"])
+    tc_sla_col = _find_column(df_tc, ["time_to_ship_dead_line", "order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
     
     # Find column names in OMS
     oms_id_col = _find_column(df_oms, ["order_no", "order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
@@ -1203,7 +1204,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         mp_store_col = _find_column(df_marketplace, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
         if mp_store_col and mp_store_col in df_marketplace.columns:
             df_marketplace = df_marketplace[~df_marketplace[mp_store_col].apply(is_tiktok_ph)].copy()
-    if not df_oms.empty and oms_store_col and oms_store_col in df_oms.columns:
+    if df_oms is not None and not df_oms.empty and oms_store_col and oms_store_col in df_oms.columns:
         df_oms = df_oms[~df_oms[oms_store_col].apply(is_tiktok_ph)].copy()
 
     # Clean IDs
@@ -1211,7 +1212,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         df_tc[tc_id_col] = df_tc[tc_id_col].apply(_clean_order_id)
     if not df_tc.empty and tc_num_col:
         df_tc[tc_num_col] = df_tc[tc_num_col].apply(_clean_order_id)
-    if not df_oms.empty and oms_id_col:
+    if df_oms is not None and not df_oms.empty and oms_id_col:
         df_oms[oms_id_col] = df_oms[oms_id_col].apply(_clean_order_id)
 
     # Build bidirectional maps for Zalora
@@ -1228,7 +1229,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     # Build OMS status lookup maps
     oms_status_map = {}
     oms_order_status_fallback_map = {}
-    if not df_oms.empty and oms_id_col:
+    if df_oms is not None and not df_oms.empty and oms_id_col:
         for _, row in df_oms.iterrows():
             oid = _clean_order_id(row[oms_id_col])
             if not oid:
@@ -1239,237 +1240,151 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             oms_status_map[key] = stat_val
             oms_order_status_fallback_map[oid] = stat_val
 
-    discrepancies = []
+    ref_date_str = datetime.today().strftime('%d-%m-%Y')
+    tc_active_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
 
-    # 1. Missing in TC Check (only if Marketplace is uploaded)
-    if df_marketplace is not None and not df_marketplace.empty:
-        mp_id_col = _find_column(df_marketplace, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-        mp_sku_col = _find_column(df_marketplace, ["custom_sku", "customSku", "sku", "item_sku", "SKU"])
-        mp_store_col = _find_column(df_marketplace, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    # Determine rows to validate from df_tc
+    tc_rows = []
+    for idx, row in df_tc.iterrows():
+        tc_stat = _clean_str(row.get(tc_status_col, "")) if tc_status_col else ""
+        tc_item_stat = _clean_str(row.get(tc_item_status_col, "")) if tc_item_status_col else ""
+        tc_stat_norm = _normalize_status_val(tc_stat)
+        tc_item_stat_norm = _normalize_status_val(tc_item_stat)
         
-        if mp_id_col:
-            df_marketplace[mp_id_col] = df_marketplace[mp_id_col].apply(_clean_order_id)
-            tc_ids = set(df_tc[tc_id_col].dropna().tolist()) if tc_id_col else set()
-            tc_nums = set(df_tc[tc_num_col].dropna().tolist()) if tc_num_col else set()
-            
-            df_marketplace["Final Remarks"] = ""
-            df_marketplace["OMS Order Status"] = "N/A"
-            df_marketplace["Correct Order Number"] = df_marketplace[mp_id_col]
-            df_marketplace["SLA Source"] = "Marketplace Report"
-            df_marketplace["SLA"] = ""
-            
-            target_store_col = mp_store_col if mp_store_col else "Store Name"
-            if target_store_col not in df_marketplace.columns:
-                df_marketplace[target_store_col] = "Default Store"
+        is_active = False
+        for active_s in tc_active_statuses:
+            if active_s in tc_stat_norm or active_s in tc_item_stat_norm:
+                is_active = True
+                break
+        if is_active:
+            tc_rows.append(row)
 
-            df_marketplace[target_store_col] = df_marketplace[target_store_col].apply(
-                lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
-            )
+    if not tc_rows:
+        tc_rows = [row for _, row in df_tc.iterrows()]
 
-            for idx, row in df_marketplace.iterrows():
-                order_id_str = str(row[mp_id_col]).strip()
-                store_val = _clean_str(row.get(target_store_col, ""))
-                sku_val = _clean_str(row.get(mp_sku_col, "")) if mp_sku_col else ""
-                
-                # Check match against TC ID or Zalora number
-                matched = False
-                if order_id_str in tc_ids:
-                    matched = True
-                elif order_id_str in tc_nums:
-                    matched = True
-                elif order_id_str in tc_id_to_num:
-                    matched = True
-                
-                if matched:
-                    df_marketplace.at[idx, "Final Remarks"] = "Imported to TC"
-                else:
-                    df_marketplace.at[idx, "Final Remarks"] = "Order missing in TC"
-                    discrepancies.append({
-                        "Order ID": order_id_str,
-                        "Nickname": store_val,
-                        "Seller SKU": sku_val,
-                        "Validation Result": "Order missing in TC",
-                        "TC Order Status": "Missing",
-                        "TC Item Status": "Missing",
-                        "OMS Order Status": "N/A",
-                        "OMS Line Status": "N/A",
-                        "Details": "Order is present in Marketplace reports but completely missing from TC Order Report."
-                    })
+    main_rows = []
+    discrepancy_rows = []
 
-    # 2. Status Reconciliation between TC and OMS
-    if not df_tc.empty and tc_id_col:
-        tc_active_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
+    for row in tc_rows:
+        oid_str = _clean_order_id(row.get(tc_id_col, ""))
+        if not oid_str:
+            continue
+
+        tc_stat = _clean_str(row.get(tc_status_col, "")) if tc_status_col else ""
+        tc_item_stat = _clean_str(row.get(tc_item_status_col, "")) if tc_item_status_col else ""
+        tc_stat_norm = _normalize_status_val(tc_stat)
+        tc_item_stat_norm = _normalize_status_val(tc_item_stat)
+
+        sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col else ""
+        ean_val = normalize_ean(sku_val)
         
-        for _, row in df_tc.iterrows():
-            oid = row[tc_id_col]
-            if not oid:
-                continue
-            oid_str = str(oid).strip()
+        oms_stat = ""
+        key1 = oid_str + ean_val
+        onum = tc_id_to_num.get(oid_str, "")
+        key3 = onum + ean_val if onum else ""
+        
+        if key1 in oms_status_map:
+            oms_stat = oms_status_map[key1]
+        elif oid_str in oms_order_status_fallback_map:
+            oms_stat = oms_order_status_fallback_map[oid_str]
+        elif key3 and key3 in oms_status_map:
+            oms_stat = oms_status_map[key3]
+        elif onum and onum in oms_order_status_fallback_map:
+            oms_stat = oms_order_status_fallback_map[onum]
+
+        store_val = _clean_str(row.get(tc_store_col, "")) if tc_store_col else "Default Store"
+        store_val = re.sub(r'puma_', '', store_val, flags=re.IGNORECASE)
+
+        sla_raw = row.get(tc_sla_col, "") if tc_sla_col else ""
+        sla_date = extract_date(sla_raw) if _clean_str(sla_raw) else "Unknown"
+        sla_status_str = compute_sla_status(sla_date, ref_date_str) if sla_date != "Unknown" else "Unknown"
+
+        is_active_in_tc = False
+        for active_s in tc_active_statuses:
+            if active_s in tc_stat_norm or active_s in tc_item_stat_norm:
+                is_active_in_tc = True
+                break
+
+        val_result = "OK"
+        details = "Order status matched between TC and OMS."
+        final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Successfully Pushed to OMS"
+        is_disc = False
+
+        if is_active_in_tc and not oms_stat:
+            val_result = "Not Pushed to OMS"
+            details = "Paid or COD order is present in TC but missing from OMS Report."
+            final_remarks = "Not Pushed to OMS"
+            is_disc = True
+        elif oms_stat:
+            tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
+            oms_cancelled = ("cancel" in oms_stat.lower() or "void" in oms_stat.lower())
             
-            # Fetch statuses
-            tc_stat = _clean_str(row.get(tc_status_col, "")) if tc_status_col else ""
-            tc_item_stat = _clean_str(row.get(tc_item_status_col, "")) if tc_item_status_col else ""
-            tc_stat_norm = _normalize_status_val(tc_stat)
-            tc_item_stat_norm = _normalize_status_val(tc_item_stat)
-            
-            is_active_in_tc = False
-            for active_s in tc_active_statuses:
-                if active_s in tc_stat_norm or active_s in tc_item_stat_norm:
-                    is_active_in_tc = True
-                    break
-            
-            sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col else ""
-            ean_val = normalize_ean(sku_val)
-            
-            oms_stat = ""
-            key1 = oid_str + ean_val
-            onum = tc_id_to_num.get(oid_str, "")
-            key3 = onum + ean_val if onum else ""
-            
-            if key1 in oms_status_map:
-                oms_stat = oms_status_map[key1]
-            elif oid_str in oms_order_status_fallback_map:
-                oms_stat = oms_order_status_fallback_map[oid_str]
-            elif key3 and key3 in oms_status_map:
-                oms_stat = oms_status_map[key3]
-            elif onum and onum in oms_order_status_fallback_map:
-                oms_stat = oms_order_status_fallback_map[onum]
+            if tc_cancelled and not oms_cancelled:
+                if "return" not in oms_stat.lower():
+                    val_result = "Cancelled Status Mismatch"
+                    details = f"Order is Cancelled in TC, but OMS shows status '{oms_stat}'."
+                    final_remarks = "Cancelled Status Mismatch"
+                    is_disc = True
+            elif not tc_cancelled and oms_cancelled:
+                val_result = "Cancelled Status Mismatch"
+                details = f"Order is Cancelled in OMS, but TC status is '{tc_stat}'."
+                final_remarks = "Cancelled Status Mismatch"
+                is_disc = True
+            else:
+                oms_packed = ("packed" in oms_stat.lower() or "pack" in oms_stat.lower())
+                tc_new = ("new" in tc_stat_norm or "new" in tc_item_stat_norm)
+                if oms_packed and tc_new:
+                    val_result = "OMS Packed but TC New"
+                    details = "Order status is Packed in OMS, but still shows as New in TC."
+                    final_remarks = "OMS Packed but TC New"
+                    is_disc = True
                 
-            store_val = _clean_str(row.get(tc_store_col, "")) if tc_store_col else "Default Store"
-            store_val = re.sub(r'puma_', '', store_val, flags=re.IGNORECASE)
-            
-            # Checks:
-            if is_active_in_tc and not oms_stat:
-                discrepancies.append({
-                    "Order ID": oid_str,
-                    "Nickname": store_val,
-                    "Seller SKU": sku_val,
-                    "Validation Result": "Not Pushed to OMS",
-                    "TC Order Status": tc_stat,
-                    "TC Item Status": tc_item_stat,
-                    "OMS Order Status": "Not in OMS",
-                    "OMS Line Status": "N/A",
-                    "Details": "Paid or COD order is present in TC but missing from OMS Report."
-                })
-            elif oms_stat:
-                tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
-                oms_cancelled = ("cancel" in oms_stat.lower() or "void" in oms_stat.lower())
-                
-                if tc_cancelled and not oms_cancelled:
-                    if "return" not in oms_stat.lower():
-                        discrepancies.append({
-                            "Order ID": oid_str,
-                            "Nickname": store_val,
-                            "Seller SKU": sku_val,
-                            "Validation Result": "Cancelled Status Mismatch",
-                            "TC Order Status": tc_stat,
-                            "TC Item Status": tc_item_stat,
-                            "OMS Order Status": oms_stat,
-                            "OMS Line Status": "N/A",
-                            "Details": f"Order is Cancelled in TC, but OMS shows status '{oms_stat}'."
-                        })
-                elif not tc_cancelled and oms_cancelled:
-                    discrepancies.append({
-                        "Order ID": oid_str,
-                        "Nickname": store_val,
-                        "Seller SKU": sku_val,
-                        "Validation Result": "Cancelled Status Mismatch",
-                        "TC Order Status": tc_stat,
-                        "TC Item Status": tc_item_stat,
-                        "OMS Order Status": oms_stat,
-                        "OMS Line Status": "N/A",
-                        "Details": f"Order is Cancelled in OMS, but TC status is '{tc_stat}'."
-                    })
-                else:
-                    oms_packed = ("packed" in oms_stat.lower() or "pack" in oms_stat.lower())
-                    tc_new = ("new" in tc_stat_norm or "new" in tc_item_stat_norm)
-                    if oms_packed and tc_new:
-                        discrepancies.append({
-                            "Order ID": oid_str,
-                            "Nickname": store_val,
-                            "Seller SKU": sku_val,
-                            "Validation Result": "OMS Packed but TC New",
-                            "TC Order Status": tc_stat,
-                            "TC Item Status": tc_item_stat,
-                            "OMS Order Status": oms_stat,
-                            "OMS Line Status": "N/A",
-                            "Details": "Order status is Packed in OMS, but still shows as New in TC."
-                        })
-                    
-                    oms_shipped = ("shipped" in oms_stat.lower() or "ship" in oms_stat.lower() or "sent" in oms_stat.lower())
-                    tc_ready_to_ship = ("ready" in tc_stat_norm or "ready" in tc_item_stat_norm or "to_ship" in tc_stat_norm)
-                    if oms_shipped and tc_ready_to_ship:
-                        discrepancies.append({
-                            "Order ID": oid_str,
-                            "Nickname": store_val,
-                            "Seller SKU": sku_val,
-                            "Validation Result": "OMS Shipped but TC Status Invalid",
-                            "TC Order Status": tc_stat,
-                            "TC Item Status": tc_item_stat,
-                            "OMS Order Status": oms_stat,
-                            "OMS Line Status": "N/A",
-                            "Details": f"OMS status is Shipped, but Pending status in TC is '{tc_stat}'."
-                        })
+                oms_shipped = ("shipped" in oms_stat.lower() or "ship" in oms_stat.lower() or "sent" in oms_stat.lower())
+                tc_ready_to_ship = ("ready" in tc_stat_norm or "ready" in tc_item_stat_norm or "to_ship" in tc_stat_norm)
+                if oms_shipped and tc_ready_to_ship:
+                    val_result = "OMS Shipped but TC Status Invalid"
+                    details = f"OMS status is Shipped, but Pending status in TC is '{tc_stat}'."
+                    final_remarks = "OMS Shipped but TC Status Invalid"
+                    is_disc = True
 
-    # Prepare return structure
-    main_df = df_marketplace if (df_marketplace is not None and not df_marketplace.empty) else df_tc.copy()
-    
-    # Filter to active/pending if no marketplace report is provided
-    if (df_marketplace is None or df_marketplace.empty) and not main_df.empty:
-        tc_active_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
-        active_tc_rows = []
-        for idx, row in main_df.iterrows():
-            tc_stat = _clean_str(row.get(tc_status_col, "")) if tc_status_col else ""
-            tc_item_stat = _clean_str(row.get(tc_item_status_col, "")) if tc_item_status_col else ""
-            tc_stat_norm = _normalize_status_val(tc_stat)
-            tc_item_stat_norm = _normalize_status_val(tc_item_stat)
-            
-            is_active_in_tc = False
-            for active_s in tc_active_statuses:
-                if active_s in tc_stat_norm or active_s in tc_item_stat_norm:
-                    is_active_in_tc = True
-                    break
-            if is_active_in_tc:
-                active_tc_rows.append(row)
-        if active_tc_rows:
-            main_df = pd.DataFrame(active_tc_rows)
-        else:
-            main_df = pd.DataFrame(columns=df_tc.columns)
+        row_data = {
+            "Order ID": oid_str,
+            "Store Name": store_val,
+            "Seller SKU": sku_val,
+            "TC Order Status": tc_stat,
+            "TC Item Status": tc_item_stat,
+            "SLA Date": sla_date,
+            "SLA": sla_status_str,
+            "sla_status": sla_status_str,
+            "OMS Order Status": oms_stat if oms_stat else "Not in OMS",
+            "Validation Result": val_result,
+            "Details": details,
+            "Final Remarks": final_remarks,
+            "Correct Order Number": oid_str,
+            "SLA Source": "TC Order Report"
+        }
 
-    target_store_col = "Store Name"
-    if not main_df.empty:
-        found_st = _find_column(main_df, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
-        if found_st:
-            target_store_col = found_st
-        else:
-            main_df["Store Name"] = "Default Store"
-            target_store_col = "Store Name"
-    else:
-        main_df = pd.DataFrame(columns=["Order ID", "Store Name"])
-        target_store_col = "Store Name"
+        main_rows.append(row_data)
+        if is_disc:
+            discrepancy_rows.append(row_data)
 
-    main_df[target_store_col] = main_df[target_store_col].apply(
-        lambda x: re.sub(r'puma_', '', str(x).strip(), flags=re.IGNORECASE)
-    )
-
-    df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
-        "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
+    main_df = pd.DataFrame(main_rows) if main_rows else pd.DataFrame(columns=[
+        "Order ID", "Store Name", "Seller SKU", "TC Order Status", "TC Item Status",
+        "SLA Date", "SLA", "sla_status", "OMS Order Status", "Validation Result", "Details", "Final Remarks"
     ])
+    
+    df_discrepancies = pd.DataFrame(discrepancy_rows) if discrepancy_rows else pd.DataFrame(columns=main_df.columns)
+    
+    target_store_col = "Store Name"
     total_discrepancies = len(df_discrepancies)
 
-    # If TC + OMS validation (no marketplace report), set main_df to contain ONLY discrepancies
-    if df_marketplace is None or df_marketplace.empty:
-        main_df = df_discrepancies.copy()
-        target_store_col = "Nickname"
-        if "Nickname" not in main_df.columns:
-            main_df["Nickname"] = "Default Store"
-            
-    # Build groupings
+    # Build seller groupings
     seller_groups = {}
-    for s_name, sub_grp in main_df.groupby(target_store_col):
-        s_name_clean = _clean_str(s_name)
-        seller_groups[s_name_clean] = {"df": sub_grp, "email": ""}
-            
+    if not main_df.empty:
+        for s_name, sub_grp in main_df.groupby(target_store_col):
+            s_name_clean = _clean_str(s_name)
+            seller_groups[s_name_clean] = {"df": sub_grp, "email": ""}
+
     # Country-specific reports
     country_reports = {}
     for country in ["SG", "MY", "PH"]:
@@ -1479,108 +1394,65 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             "summary_df": pd.DataFrame()
         }
 
-    main_id_col = "Order ID"
-    if not (df_marketplace is None or df_marketplace.empty):
-        main_id_col = _find_column(main_df, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
-        if not main_id_col:
-            main_id_col = "Order ID"
-            main_df["Order ID"] = ""
-            
-        main_df["Correct Order Number"] = main_df[main_id_col]
-        main_df["OMS Order Status"] = "N/A"
-        
-        # Fill OMS Order Status from lookup
-        for idx, row in main_df.iterrows():
-            oid = _clean_order_id(row[main_id_col])
-            sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col and tc_sku_col in main_df.columns else ""
-            ean_val = normalize_ean(sku_val)
-            key1 = oid + ean_val
-            onum = tc_id_to_num.get(oid, "")
-            key3 = onum + ean_val if onum else ""
-            
-            if key1 in oms_status_map:
-                main_df.at[idx, "OMS Order Status"] = oms_status_map[key1]
-            elif oid in oms_order_status_fallback_map:
-                main_df.at[idx, "OMS Order Status"] = oms_order_status_fallback_map[oid]
-            elif key3 and key3 in oms_status_map:
-                main_df.at[idx, "OMS Order Status"] = oms_status_map[key3]
-            elif onum and onum in oms_order_status_fallback_map:
-                main_df.at[idx, "OMS Order Status"] = oms_order_status_fallback_map[onum]
+    if not main_df.empty:
+        main_df["_country"] = main_df[target_store_col].apply(lambda x: parse_country_and_channel(x)[0])
+        for country, country_grp in main_df.groupby("_country"):
+            if country not in ["SG", "MY", "PH"]:
+                continue
+            c_rows = []
+            for idx, row in country_grp.iterrows():
+                store_val = _clean_str(row[target_store_col])
+                c_code, chan = parse_country_and_channel(store_val)
+                row_dict = row.to_dict()
+                row_dict["Country"] = country
+                row_dict["Channel"] = f"{chan} {country}"
+                c_rows.append(row_dict)
+                
+            country_df = pd.DataFrame(c_rows)
+            if not country_df.empty:
+                col_to_use = "Final Remarks"
+                pivot_df = country_df.pivot_table(
+                    index=["Channel", "OMS Order Status"],
+                    columns=col_to_use,
+                    values="Correct Order Number",
+                    aggfunc="count",
+                    fill_value=0
+                )
+                pivot_df["Grand Total"] = pivot_df.sum(axis=1)
+                pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
+                pivot_df = pivot_df.reset_index()
+                
+                summary_metrics = [
+                    {"Metric": "Overdue (SLA breached)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "breached").sum())},
+                    {"Metric": "Handover today (Today SLA)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "today").sum())},
+                    {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
+                    {"Metric": "Within SLA (Future)", "Count": int((country_df["sla_status"].astype(str).str.strip().str.lower() == "future").sum())},
+                    {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())},
+                    {"Metric": "Unpaid Orders", "Count": 0}
+                ]
+                summary_df = pd.DataFrame(summary_metrics)
+                
+                cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel", "_country"]
+                country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
+                
+                country_reports[country] = {
+                    "raw_df": country_df_export,
+                    "pivot_df": pivot_df,
+                    "summary_df": summary_df
+                }
 
-        if "Final Remarks" not in main_df.columns:
-            main_df["Final Remarks"] = ""
-            for idx, row in main_df.iterrows():
-                oid = _clean_order_id(row[main_id_col])
-                order_discs = [d for d in discrepancies if d["Order ID"] == oid]
-                if order_discs:
-                    main_df.at[idx, "Final Remarks"] = order_discs[0]["Validation Result"]
-                else:
-                    main_df.at[idx, "Final Remarks"] = "Imported & Pushed to OMS"
-    else:
-        main_df["Correct Order Number"] = main_df["Order ID"]
-        main_df["Final Remarks"] = main_df["Validation Result"]
-
-    main_df["_country"] = main_df[target_store_col].apply(lambda x: parse_country_and_channel(x)[0])
-    for country, country_grp in main_df.groupby("_country"):
-        if country not in ["SG", "MY", "PH"]:
-            continue
-        c_rows = []
-        for idx, row in country_grp.iterrows():
-            store_val = _clean_str(row[target_store_col])
-            c_code, chan = parse_country_and_channel(store_val)
-            row_dict = row.to_dict()
-            row_dict["Country"] = country
-            row_dict["Channel"] = f"{chan} {country}"
-            c_rows.append(row_dict)
-            
-        country_df = pd.DataFrame(c_rows)
-        if not country_df.empty:
-            # Create a Pivot Table
-            col_to_use = "Final Remarks"
-            pivot_df = country_df.pivot_table(
-                index=["Channel", "OMS Order Status"],
-                columns=col_to_use,
-                values="Correct Order Number",
-                aggfunc="count",
-                fill_value=0
-            )
-            pivot_df["Grand Total"] = pivot_df.sum(axis=1)
-            pivot_df.loc[("Grand Total", ""), :] = pivot_df.sum(axis=0)
-            pivot_df = pivot_df.reset_index()
-            
-            summary_metrics = [
-                {"Metric": "Overdue (SLA breached)", "Count": int((country_df["Final Remarks"] == "Order missing in TC").sum())},
-                {"Metric": "Handover today (Today SLA)", "Count": len([d for d in discrepancies if d["Order ID"] in set(country_df[main_id_col].dropna().astype(str).tolist())])},
-                {"Metric": "Order Status at New", "Count": int((country_df["OMS Order Status"].astype(str).str.strip().str.lower() == "new").sum())},
-                {"Metric": "Within SLA (Future)", "Count": 0},
-                {"Metric": "Not reflecting in OM", "Count": int((country_df["OMS Order Status"] == "Not in OMS").sum())},
-                {"Metric": "Unpaid Orders", "Count": 0}
-            ]
-            summary_df = pd.DataFrame(summary_metrics)
-            
-            cols_to_drop = ["Correct Order Number", "SLA Source", "Order Date", "Country", "Channel", "_country"]
-            country_df_export = country_df.drop(columns=[c for c in cols_to_drop if c in country_df.columns])
-            
-            country_reports[country] = {
-                "raw_df": country_df_export,
-                "pivot_df": pivot_df,
-                "summary_df": summary_df
-            }
-
-    ref_date_str = datetime.today().strftime('%d-%m-%Y')
-    total_orders = len(df_marketplace) if (df_marketplace is not None and not df_marketplace.empty) else len(df_tc)
-    pushed_cnt = total_orders - total_discrepancies
-    not_pushed_cnt = total_discrepancies
+    reflected_count = len(main_df) - total_discrepancies
+    missing_count = total_discrepancies
 
     summary = {
-        "total_pending_orders": total_orders,
-        "enriched_sla_count": 0,
+        "total_pending_orders": len(main_df),
+        "enriched_sla_count": len(main_df),
         "blank_sla_not_found": 0,
         "total_discrepancies": total_discrepancies,
-        "cancelled_mismatches": 0,
-        "packed_mismatches": 0,
-        "pushed_count": pushed_cnt,
-        "not_pushed_count": not_pushed_cnt,
+        "cancelled_mismatches": len([r for r in main_rows if "Cancelled" in r["Validation Result"]]),
+        "packed_mismatches": len([r for r in main_rows if "Packed" in r["Validation Result"]]),
+        "pushed_count": reflected_count,
+        "not_pushed_count": missing_count,
         "unpaid_count": 0,
         "total_sellers": len(seller_groups),
         "all_imported_to_tc": (total_discrepancies == 0),
@@ -1592,7 +1464,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         "discrepancies_df": df_discrepancies,
         "summary": summary,
         "seller_groups": seller_groups,
-        "pending_order_id_col": main_id_col,
+        "pending_order_id_col": "Order ID",
         "country_reports": country_reports,
         "ref_date_dmy": ref_date_str
     }
