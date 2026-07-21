@@ -177,8 +177,26 @@ else:
             
             if summary["all_imported_to_tc"]:
                 st.success("🎉 **All active TC orders are successfully verified in OMS!**")
+        elif mode in ("order_status_reconciliation", "tc_oms"):
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total TC Orders", summary["total_pending_orders"])
+            m2.metric("Reflecting in OMS", summary["pushed_count"])
+            m3.metric("Status Discrepancies in OMS", summary["not_pushed_count"])
+            
+            if summary["all_imported_to_tc"]:
+                st.success("🎉 **All TC orders are successfully verified in OMS!**")
             else:
                 st.error(f"⚠️ **Found {summary['not_pushed_count']} status discrepancies between TC and OMS!**")
+        elif mode == "order_flow_check":
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Marketplace & TC Orders", summary["total_pending_orders"])
+            m2.metric("Reflecting in OMS", summary["pushed_count"])
+            m3.metric("Missing & Mismatches", summary["not_pushed_count"])
+            
+            if summary["all_imported_to_tc"]:
+                st.success("🎉 **All Marketplace orders reflect in TC and match OMS!**")
+            else:
+                st.error(f"⚠️ **Found {summary['not_pushed_count']} missing or status mismatch orders!**")
         elif mode == "tc_marketplace":
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Marketplace Orders", summary["total_pending_orders"])
@@ -189,7 +207,7 @@ else:
                 st.success("🎉 **All Marketplace orders are successfully imported to TC!**")
             else:
                 st.error(f"⚠️ **Found {summary['not_pushed_count']} orders missing from TC!**")
-        elif has_pending:
+        else:
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total Pending Orders", summary["total_pending_orders"])
             m2.metric("Successfully Pushed", summary["pushed_count"])
@@ -198,15 +216,9 @@ else:
             m5.metric("Status Discrepancies", summary["total_discrepancies"], 
                       delta=summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else None, 
                       delta_color="inverse")
-        else:
-            m1, = st.columns(1)
-            m1.metric("Status Discrepancies Found", summary["total_discrepancies"], 
-                      delta=summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else None, 
-                      delta_color="inverse")
         
-        if has_pending:
-            # Download Section matching screenshot
-            # Country-specific reports download container
+        # Only render Country SLA Reports & Email Center for Pending Order Creation modes (Mode 1 & 5)
+        if mode in ("gsheet_oms", "pending_creation", "full"):
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Country SLA & Pivot Reports (Styled)</h3>', unsafe_allow_html=True)
             
@@ -240,17 +252,13 @@ else:
             
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                # Sheet 1: SLA Report (dropping Correct Order Number and SLA Source as requested)
                 export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
                 export_enriched_df.to_excel(writer, sheet_name="SLA Report", index=False)
-                # Sheet 2: Status Discrepancies
                 disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
                 
-                # Format using excel_formatter
                 excel_formatter.format_data_sheet(writer.sheets["SLA Report"], export_enriched_df)
                 excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
                 
-                # Country-specific styled Summary and Data sheets
                 for country in ["SG", "MY", "PH"]:
                     c_data = country_reports.get(country, {})
                     pivot_df = c_data.get("pivot_df", pd.DataFrame())
@@ -262,7 +270,6 @@ else:
                             writer.book, country, raw_df, pivot_df, summary_df, ref_date_dmy
                         )
                 
-                # Reorder sheets to show all summaries first, then main reports, then data sheets
                 wb = writer.book
                 sheet_order = []
                 for c in ["SG", "MY", "PH"]:
@@ -286,6 +293,29 @@ else:
                 key="dl_consolidated"
             )
             st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("### Detailed Results")
+            sub_tab1, sub_tab2, sub_tab3 = st.tabs([
+                "SLA Report", 
+                "Status Discrepancies", 
+                "Country Reports & Email Center"
+            ])
+            
+            with sub_tab1:
+                st.markdown("#### Enriched SLA Report (Main Sheet)")
+                display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                st.dataframe(display_enriched, use_container_width=True, hide_index=True)
+                
+            with sub_tab2:
+                st.markdown("#### Validation Failures & Status Discrepancies (Separate Sheet)")
+                if disc_df.empty:
+                    st.success("No status discrepancies or validation failures identified!")
+                else:
+                    st.warning(f"Found {len(disc_df)} discrepancies/warnings.")
+                    st.dataframe(disc_df, use_container_width=True, hide_index=True)
+                    
+            with sub_tab3:
+                # Email center setup...
         else:
             if mode == "tc_marketplace":
                 st.markdown('<div class="download-container">', unsafe_allow_html=True)
