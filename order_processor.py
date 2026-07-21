@@ -1412,94 +1412,97 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         sla_date = extract_date(sla_raw) if _clean_str(sla_raw) else "Unknown"
         sla_status_str = compute_sla_status(sla_date, ref_date_str) if sla_date != "Unknown" else "Unknown"
 
-        is_active_in_tc = False
-        for active_s in tc_active_statuses:
-            if active_s in tc_stat_norm or active_s in tc_item_stat_norm:
-                is_active_in_tc = True
-                break
+        # Reconcile strictly between TC Item Status (fallback TC Order Status) and OMS Line Status (fallback OMS Order Status)
+        item_norm = tc_item_stat_norm if tc_item_stat_norm else tc_stat_norm
+        line_norm = _clean_str(oms_line_stat).lower() if oms_line_stat else _clean_str(oms_stat).lower()
+
+        tc_is_return = ("return" in item_norm)
+        tc_is_cancelled = ("cancel" in item_norm or "lost" in item_norm or "refund" in item_norm)
+        tc_is_failed = ("failed" in item_norm)
+        tc_is_delivered = ("delivered" in item_norm)
+        tc_is_new = ("new" in item_norm)
+        tc_is_ready = ("ready" in item_norm or "to_ship" in item_norm or tc_is_new)
+        is_active_in_tc = tc_is_new or tc_is_ready
+
+        oms_is_returned = ("return" in line_norm)
+        oms_is_cancelled = ("cancel" in line_norm or "void" in line_norm or "refund" in line_norm)
+        oms_is_delivered = ("delivered" in line_norm)
+        oms_is_shipped = ("shipped" in line_norm or "ship" in line_norm or "sent" in line_norm)
+        oms_is_packed = ("packed" in line_norm or "pack" in line_norm)
 
         val_result = "OK"
-        details = "Order status matched between TC and OMS."
+        details = "Order item status matched between TC and OMS."
         final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Successfully Pushed to OMS"
         is_disc = False
 
-        tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
-        tc_failed = ("failed" in tc_stat_norm or "failed" in tc_item_stat_norm)
-        oms_returned = ("return" in oms_stat.lower() or "returned" in oms_stat.lower() or "return" in oms_line_stat.lower() or "returned" in oms_line_stat.lower())
-
-        if tc_return:
+        if tc_is_return:
+            # Return requested/accepted on marketplace is not pushed to OMS - Ignored
             val_result = "Returned (Ignored)"
-            details = f"TC status is '{tc_stat or tc_item_stat}', OMS status is '{oms_stat}' (Return requested/accepted is not pushed to OMS - Ignored)."
+            details = f"TC Item Status is '{tc_item_stat or tc_stat}', OMS Line Status is '{oms_line_stat}' (Return requested/accepted is ignored)."
             final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Returned (Ignored)"
             is_disc = False
-        elif tc_failed and oms_returned:
+
+        elif tc_is_failed and (oms_is_returned or oms_is_cancelled or oms_is_delivered):
+            # Delivery failed orders returned to warehouse - Ignored
             val_result = "Delivery Failed (Returned)"
-            details = f"TC status is Delivery Failed, OMS status is Returned (Delivery Failed orders returned to warehouse - Ignored)."
+            details = f"TC Item Status is Delivery Failed, OMS Line Status is '{oms_line_stat}' (Delivery Failed orders returned to warehouse - Ignored)."
             final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Delivery Failed (Returned)"
             is_disc = False
-        elif is_active_in_tc and not oms_stat:
+
+        elif tc_is_cancelled:
+            if oms_is_cancelled or oms_is_returned or not oms_stat or oms_stat == "Not in OMS":
+                # Cancelled or Lost in TC and Returned/Cancelled in OMS - Ignored
+                val_result = "Cancelled/Returned (Ignored)"
+                details = f"TC Item Status is Cancelled, OMS Line Status is '{oms_line_stat}' (Normal cancellation/return - Ignored)."
+                final_remarks = "Cancelled/Returned (Ignored)"
+                is_disc = False
+            else:
+                val_result = "Cancelled Status Mismatch"
+                details = f"TC Item Status is Cancelled, but OMS Line Status shows '{oms_line_stat}'."
+                final_remarks = "Cancelled Status Mismatch"
+                is_disc = True
+
+        elif is_active_in_tc and (not oms_stat or oms_stat == "Not in OMS"):
             val_result = "Not Pushed to OMS"
             details = "Paid or COD order is present in TC but missing from OMS Report."
             final_remarks = "Not Pushed to OMS"
             is_disc = True
-        elif not oms_stat:
-            tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
-            if tc_cancelled:
-                val_result = "Returned/Cancelled (Ignored)"
-                details = f"TC status is '{tc_stat or tc_item_stat}' and missing from OMS."
-                final_remarks = "Returned/Cancelled (Ignored)"
-                is_disc = False
-            else:
-                val_result = "Not in OMS"
-                details = f"TC status is '{tc_stat}', but order is missing from OMS Report."
-                final_remarks = "Not in OMS"
-                is_disc = True
-        elif oms_stat:
-            tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
-            oms_cancelled = ("cancel" in oms_stat.lower() or "void" in oms_stat.lower())
-            
-            if tc_cancelled and not oms_cancelled:
-                val_result = "Cancelled Status Mismatch"
-                details = f"Order is Cancelled in TC, but OMS shows status '{oms_stat}'."
-                final_remarks = "Cancelled Status Mismatch"
-                is_disc = True
-            elif not tc_cancelled and oms_cancelled:
-                val_result = "Cancelled Status Mismatch"
-                details = f"Order is Cancelled in OMS, but TC status is '{tc_stat}'."
-                final_remarks = "Cancelled Status Mismatch"
-                is_disc = True
-            else:
-                oms_packed = ("packed" in oms_stat.lower() or "pack" in oms_stat.lower() or "packed" in oms_line_stat.lower())
-                tc_new = ("new" in tc_stat_norm or "new" in tc_item_stat_norm)
-                if oms_packed and tc_new:
-                    val_result = "OMS Packed but TC New"
-                    details = "Order status is Packed in OMS, but still shows as New in TC."
-                    final_remarks = "OMS Packed but TC New"
-                    is_disc = True
-                
-                oms_shipped = ("shipped" in oms_stat.lower() or "ship" in oms_stat.lower() or "sent" in oms_stat.lower() or "shipped" in oms_line_stat.lower())
-                tc_ready_to_ship = ("ready" in tc_stat_norm or "ready" in tc_item_stat_norm or "to_ship" in tc_stat_norm or tc_new)
-                if oms_shipped and tc_ready_to_ship:
-                    val_result = "OMS Shipped but TC Status Invalid"
-                    details = f"OMS status is Shipped, but Pending status in TC is '{tc_stat}'."
-                    final_remarks = "OMS Shipped but TC Status Invalid"
-                    is_disc = True
 
-                # Rule 4: TC Delivered but OMS not Delivered
-                tc_is_delivered = ("delivered" in tc_stat_norm or "delivered" in tc_item_stat_norm)
-                oms_is_delivered = ("delivered" in oms_stat.lower() or "delivered" in oms_line_stat.lower())
-                if tc_is_delivered and not oms_is_delivered:
-                    val_result = "TC Delivered but OMS not Delivered"
-                    details = f"TC status is Delivered, but OMS status is '{oms_stat}'."
-                    final_remarks = "TC Delivered but OMS not Delivered"
-                    is_disc = True
+        elif not oms_stat or oms_stat == "Not in OMS":
+            val_result = "Not in OMS"
+            details = f"TC Item Status is '{tc_item_stat or tc_stat}', but order is missing from OMS Report."
+            final_remarks = "Not in OMS"
+            is_disc = True
 
-                # Rule 6: TC Delivery Failed but OMS not Returned
-                if tc_failed and not oms_returned:
-                    val_result = "TC Delivery Failed but OMS not Returned"
-                    details = f"TC status is Delivery Failed, but OMS status is '{oms_stat}'."
-                    final_remarks = "TC Delivery Failed but OMS not Returned"
-                    is_disc = True
+        elif oms_is_cancelled and not (tc_is_cancelled or tc_is_return or tc_is_failed):
+            val_result = "Cancelled Status Mismatch"
+            details = f"OMS Line Status is Cancelled, but TC Item Status is '{tc_item_stat or tc_stat}'."
+            final_remarks = "Cancelled Status Mismatch"
+            is_disc = True
+
+        elif tc_is_delivered and not oms_is_delivered:
+            val_result = "TC Delivered but OMS not Delivered"
+            details = f"TC Item Status is Delivered, but OMS Line Status is '{oms_line_stat}'."
+            final_remarks = "TC Delivered but OMS not Delivered"
+            is_disc = True
+
+        elif oms_is_shipped and tc_is_ready and not tc_is_delivered:
+            val_result = "OMS Shipped but TC Status Invalid"
+            details = f"OMS Line Status is Shipped, but Pending item status in TC is '{tc_item_stat or tc_stat}'."
+            final_remarks = "OMS Shipped but TC Status Invalid"
+            is_disc = True
+
+        elif oms_is_packed and tc_is_new and not tc_is_delivered:
+            val_result = "OMS Packed but TC New"
+            details = "OMS Line Status is Packed, but TC Item Status is New."
+            final_remarks = "OMS Packed but TC New"
+            is_disc = True
+
+        elif tc_is_failed and not (oms_is_returned or oms_is_cancelled):
+            val_result = "TC Delivery Failed but OMS not Returned"
+            details = f"TC Item Status is Delivery Failed, but OMS Line Status is '{oms_line_stat}'."
+            final_remarks = "TC Delivery Failed but OMS not Returned"
+            is_disc = True
 
         row_data = {
             "Order ID": oid_str,
