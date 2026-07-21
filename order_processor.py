@@ -530,6 +530,9 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         sku_val = normalize_ean(row.get(pend_sku_col)) if pend_sku_col else ""
         key = order_id_str + sku_val
         
+        pay_stat_val = _clean_str(row.get(pend_pay_status_col, "")) if pend_pay_status_col else ""
+        pay_meth_val = _clean_str(row.get(pend_pay_method_col, "")) if pend_pay_method_col else ""
+        
         # Resolve order number for Zalora matching
         ord_num = _clean_order_id(row.get(pend_num_col)) if pend_num_col else ""
         match_id = ord_num if ord_num else order_id_str
@@ -581,6 +584,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                                 "Order ID": order_id_str,
                                 "Nickname": store_val,
                                 "SKU": sku_val,
+                                "Payment Status": pay_stat_val,
+                                "Payment Method": pay_meth_val,
                                 "Validation Result": "Cancelled Status Mismatch",
                                 "TC Order Status": pend_stat_raw,
                                 "TC Item Status": pend_stat_raw,
@@ -595,6 +600,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "Order ID": order_id_str,
                             "Nickname": store_val,
                             "SKU": sku_val,
+                            "Payment Status": pay_stat_val,
+                            "Payment Method": pay_meth_val,
                             "Validation Result": "OMS Packed but TC New",
                             "TC Order Status": pend_stat_raw,
                             "TC Item Status": pend_stat_raw,
@@ -615,6 +622,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                                 "Order ID": order_id_str,
                                 "Nickname": store_val,
                                 "SKU": sku_val,
+                                "Payment Status": pay_stat_val,
+                                "Payment Method": pay_meth_val,
                                 "Validation Result": "OMS Shipped but TC Status Invalid",
                                 "TC Order Status": pend_stat_raw,
                                 "TC Item Status": pend_stat_raw,
@@ -629,6 +638,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "Order ID": order_id_str,
                             "Nickname": store_val,
                             "SKU": sku_val,
+                            "Payment Status": pay_stat_val,
+                            "Payment Method": pay_meth_val,
                             "Validation Result": "TC Delivered but OMS not Delivered",
                             "TC Order Status": pend_stat_raw,
                             "TC Item Status": pend_stat_raw,
@@ -643,6 +654,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "Order ID": order_id_str,
                             "Nickname": store_val,
                             "SKU": sku_val,
+                            "Payment Status": pay_stat_val,
+                            "Payment Method": pay_meth_val,
                             "Validation Result": "TC Returned but OMS not Returned",
                             "TC Order Status": pend_stat_raw,
                             "TC Item Status": pend_stat_raw,
@@ -657,6 +670,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "Order ID": order_id_str,
                             "Nickname": store_val,
                             "SKU": sku_val,
+                            "Payment Status": pay_stat_val,
+                            "Payment Method": pay_meth_val,
                             "Validation Result": "TC Delivery Failed but OMS not Returned",
                             "TC Order Status": pend_stat_raw,
                             "TC Item Status": pend_stat_raw,
@@ -697,6 +712,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                     "Order ID": order_id_str,
                     "Nickname": store_val,
                     "SKU": sku_val,
+                    "Payment Status": pay_stat_val,
+                    "Payment Method": pay_meth_val,
                     "Validation Result": "Not Pushed to OMS",
                     "TC Order Status": pend_stat_raw if pend_status_col else "N/A",
                     "TC Item Status": pend_stat_raw if pend_status_col else "N/A",
@@ -1190,11 +1207,16 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     tc_sku_col = _find_column(df_tc, ["seller_sku", "sellerSku", "Seller SKU", "SellerSKU", "custom_sku", "customSku", "sku"])
     tc_sla_col = _find_column(df_tc, ["time_to_ship_dead_line", "order_sla", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date"])
     
+    tc_pay_status_col = _find_column(df_tc, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"])
+    tc_pay_method_col = _find_column(df_tc, ["payment_methods", "Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"])
+
     # Find column names in OMS
     oms_id_col = _find_column(df_oms, ["order_no", "order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     oms_status_col = _find_column(df_oms, ["order_status", "OMS Status", "Order Status", "Status", "OMS_Status"])
     oms_ean_col = _find_column(df_oms, ["ean", "EAN", "Ean", "item_sku", "SKU"])
     oms_store_col = _find_column(df_oms, ["store", "nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
+    oms_pay_status_col = _find_column(df_oms, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"]) if df_oms is not None else None
+    oms_pay_method_col = _find_column(df_oms, ["payment_methods", "Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"]) if df_oms is not None else None
 
     # Filter out TikTok PH from input datasets
     is_tiktok_ph = lambda x: str(x).strip().lower().replace(" ", "").replace("-", "").replace("_", "") == "tiktokph"
@@ -1226,9 +1248,11 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 tc_id_to_num[oid] = onum
                 tc_num_to_id[onum] = oid
 
-    # Build OMS status lookup maps
+    # Build OMS status and payment lookup maps
     oms_status_map = {}
     oms_order_status_fallback_map = {}
+    oms_pay_status_map = {}
+    oms_pay_method_map = {}
     if df_oms is not None and not df_oms.empty and oms_id_col:
         for _, row in df_oms.iterrows():
             oid = _clean_order_id(row[oms_id_col])
@@ -1239,6 +1263,10 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             stat_val = _clean_str(row.get(oms_status_col, "")) if oms_status_col else ""
             oms_status_map[key] = stat_val
             oms_order_status_fallback_map[oid] = stat_val
+            if oms_pay_status_col:
+                oms_pay_status_map[oid] = _clean_str(row.get(oms_pay_status_col, ""))
+            if oms_pay_method_col:
+                oms_pay_method_map[oid] = _clean_str(row.get(oms_pay_method_col, ""))
 
     ref_date_str = datetime.today().strftime('%d-%m-%Y')
     tc_active_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
@@ -1278,6 +1306,13 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         sku_val = _clean_str(row.get(tc_sku_col, "")) if tc_sku_col else ""
         ean_val = normalize_ean(sku_val)
         
+        pay_stat = _clean_str(row.get(tc_pay_status_col, "")) if tc_pay_status_col else ""
+        pay_meth = _clean_str(row.get(tc_pay_method_col, "")) if tc_pay_method_col else ""
+        if not pay_stat and oid_str in oms_pay_status_map:
+            pay_stat = oms_pay_status_map[oid_str]
+        if not pay_meth and oid_str in oms_pay_method_map:
+            pay_meth = oms_pay_method_map[oid_str]
+
         oms_stat = ""
         key1 = oid_str + ean_val
         onum = tc_id_to_num.get(oid_str, "")
@@ -1353,6 +1388,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             "Seller SKU": sku_val,
             "TC Order Status": tc_stat,
             "TC Item Status": tc_item_stat,
+            "Payment Status": pay_stat,
+            "Payment Method": pay_meth,
             "SLA Date": sla_date,
             "SLA": sla_status_str,
             "sla_status": sla_status_str,
@@ -1370,7 +1407,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
 
     main_df = pd.DataFrame(main_rows) if main_rows else pd.DataFrame(columns=[
         "Order ID", "Store Name", "Seller SKU", "TC Order Status", "TC Item Status",
-        "SLA Date", "SLA", "sla_status", "OMS Order Status", "Validation Result", "Details", "Final Remarks"
+        "Payment Status", "Payment Method", "SLA Date", "SLA", "sla_status",
+        "OMS Order Status", "Validation Result", "Details", "Final Remarks"
     ])
     
     df_discrepancies = pd.DataFrame(discrepancy_rows) if discrepancy_rows else pd.DataFrame(columns=main_df.columns)
@@ -1910,6 +1948,8 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                             "Order ID": order_id_str,
                             "Nickname": store_val,
                             "SKU": tc_sku_val,
+                            "Payment Status": pay_status,
+                            "Payment Method": pay_method,
                             "Validation Result": "Not Pushed to OMS",
                             "TC Order Status": tc_ord_status,
                             "TC Item Status": tc_itm_status,
