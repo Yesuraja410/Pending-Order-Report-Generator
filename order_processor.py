@@ -1271,24 +1271,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     ref_date_str = datetime.today().strftime('%d-%m-%Y')
     tc_active_statuses = {"new", "ready to ship", "accepted/picked", "picked", "accepted"}
 
-    # Determine rows to validate from df_tc
-    tc_rows = []
-    for idx, row in df_tc.iterrows():
-        tc_stat = _clean_str(row.get(tc_status_col, "")) if tc_status_col else ""
-        tc_item_stat = _clean_str(row.get(tc_item_status_col, "")) if tc_item_status_col else ""
-        tc_stat_norm = _normalize_status_val(tc_stat)
-        tc_item_stat_norm = _normalize_status_val(tc_item_stat)
-        
-        is_active = False
-        for active_s in tc_active_statuses:
-            if active_s in tc_stat_norm or active_s in tc_item_stat_norm:
-                is_active = True
-                break
-        if is_active:
-            tc_rows.append(row)
-
-    if not tc_rows:
-        tc_rows = [row for _, row in df_tc.iterrows()]
+    # Process all rows from df_tc for complete status reconciliation
+    tc_rows = [row for _, row in df_tc.iterrows()]
 
     main_rows = []
     discrepancy_rows = []
@@ -1350,6 +1334,18 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             details = "Paid or COD order is present in TC but missing from OMS Report."
             final_remarks = "Not Pushed to OMS"
             is_disc = True
+        elif not oms_stat:
+            tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
+            if tc_cancelled:
+                val_result = "Cancelled (Ignored)"
+                details = "Order is Cancelled in TC and missing from OMS."
+                final_remarks = "Cancelled (Ignored)"
+                is_disc = False
+            else:
+                val_result = "Not in OMS"
+                details = f"TC status is '{tc_stat}', but order is missing from OMS Report."
+                final_remarks = "Not in OMS"
+                is_disc = True
         elif oms_stat:
             tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
             oms_cancelled = ("cancel" in oms_stat.lower() or "void" in oms_stat.lower())
@@ -1375,11 +1371,32 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                     is_disc = True
                 
                 oms_shipped = ("shipped" in oms_stat.lower() or "ship" in oms_stat.lower() or "sent" in oms_stat.lower())
-                tc_ready_to_ship = ("ready" in tc_stat_norm or "ready" in tc_item_stat_norm or "to_ship" in tc_stat_norm)
+                tc_ready_to_ship = ("ready" in tc_stat_norm or "ready" in tc_item_stat_norm or "to_ship" in tc_stat_norm or tc_new)
                 if oms_shipped and tc_ready_to_ship:
                     val_result = "OMS Shipped but TC Status Invalid"
                     details = f"OMS status is Shipped, but Pending status in TC is '{tc_stat}'."
                     final_remarks = "OMS Shipped but TC Status Invalid"
+                    is_disc = True
+
+                # Rule 4: TC Delivered but OMS not Delivered
+                if "delivered" in tc_stat_norm and "delivered" not in oms_stat.lower():
+                    val_result = "TC Delivered but OMS not Delivered"
+                    details = f"TC status is Delivered, but OMS status is '{oms_stat}'."
+                    final_remarks = "TC Delivered but OMS not Delivered"
+                    is_disc = True
+
+                # Rule 5: TC Returned but OMS not Returned
+                if ("returned" in tc_stat_norm or "return" in tc_stat_norm) and not ("returned" in oms_stat.lower() or "return" in oms_stat.lower()):
+                    val_result = "TC Returned but OMS not Returned"
+                    details = f"TC status is Returned, but OMS status is '{oms_stat}'."
+                    final_remarks = "TC Returned but OMS not Returned"
+                    is_disc = True
+
+                # Rule 6: TC Delivery Failed but OMS not Returned
+                if "failed" in tc_stat_norm and not ("returned" in oms_stat.lower() or "return" in oms_stat.lower()):
+                    val_result = "TC Delivery Failed but OMS not Returned"
+                    details = f"TC status is Delivery Failed, but OMS status is '{oms_stat}'."
+                    final_remarks = "TC Delivery Failed but OMS not Returned"
                     is_disc = True
 
         row_data = {
