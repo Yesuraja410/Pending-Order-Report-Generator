@@ -170,10 +170,12 @@ else:
         # Display metrics
         st.markdown("### Key Metrics")
         if mode == "tc_oms":
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Number of Orders", summary["total_pending_orders"])
             m2.metric("Reflecting in OMS", summary["pushed_count"])
             m3.metric("Missing in OMS", summary["not_pushed_count"])
+            mismatch_order_count = disc_df["Order ID"].nunique() if not disc_df.empty and "Order ID" in disc_df.columns else 0
+            m4.metric("Mismatch Order Count", mismatch_order_count)
             
             if summary["all_imported_to_tc"]:
                 st.success("🎉 **All active TC orders are successfully verified in OMS!**")
