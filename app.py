@@ -457,10 +457,15 @@ else:
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Order Flow Check Report (Styled)</h3>', unsafe_allow_html=True)
             
-            export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+            cols_to_drop_consolidated = ["Details", "Final Remarks", "_country", "Correct Order Number", "SLA Source"]
+            cols_to_drop_mismatches = ["SLA Date", "SLA", "sla_status", "Details", "Final Remarks", "Correct Order Number", "SLA Source", "_country"]
+            
+            export_enriched_df = enriched_df.drop(columns=[c for c in cols_to_drop_consolidated if c in enriched_df.columns], errors="ignore")
+            export_disc_df = disc_df.drop(columns=[c for c in cols_to_drop_mismatches if c in disc_df.columns], errors="ignore")
+
             excel_bytes_data = excel_formatter.generate_fast_excel_bytes({
                 "Consolidated Report": export_enriched_df,
-                "Missing & Mismatch Orders": disc_df
+                "Missing & Mismatch Orders": export_disc_df
             })
                 
             st.download_button(
@@ -481,26 +486,30 @@ else:
             
             with sub_tab1:
                 st.markdown("#### Consolidated Report (Sheet 1)")
-                display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
-                st.dataframe(display_enriched, use_container_width=True, hide_index=True)
+                st.dataframe(export_enriched_df, use_container_width=True, hide_index=True)
                 
             with sub_tab2:
                 st.markdown("#### Missing & Mismatch Orders (Sheet 2)")
-                if disc_df.empty:
+                if export_disc_df.empty:
                     st.success("🎉 All Marketplace orders are reflected in TC and all TC orders match OMS!")
                 else:
-                    st.warning(f"⚠️ Found {len(disc_df)} missing or mismatch orders.")
-                    st.dataframe(disc_df, use_container_width=True, hide_index=True)
+                    st.warning(f"⚠️ Found {len(export_disc_df)} missing or mismatch orders.")
+                    st.dataframe(export_disc_df, use_container_width=True, hide_index=True)
 
         else:
             # Mode 3: Order Status Reconciliation (File 2 + File 4: TC + OMS)
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Status Reconciliation Report (Styled)</h3>', unsafe_allow_html=True)
             
-            export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+            cols_to_drop_consolidated = ["Details", "Final Remarks", "_country", "Correct Order Number", "SLA Source"]
+            cols_to_drop_mismatches = ["SLA Date", "SLA", "sla_status", "Details", "Final Remarks", "Correct Order Number", "SLA Source", "_country"]
+            
+            export_enriched_df = enriched_df.drop(columns=[c for c in cols_to_drop_consolidated if c in enriched_df.columns], errors="ignore")
+            export_disc_df = disc_df.drop(columns=[c for c in cols_to_drop_mismatches if c in disc_df.columns], errors="ignore")
+
             excel_bytes_data = excel_formatter.generate_fast_excel_bytes({
                 "Consolidated Report": export_enriched_df,
-                "Status Mismatches": disc_df
+                "Status Mismatches": export_disc_df
             })
                 
             st.download_button(
@@ -521,16 +530,15 @@ else:
             
             with sub_tab1:
                 st.markdown("#### Consolidated Report (Sheet 1)")
-                display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
-                st.dataframe(display_enriched, use_container_width=True, hide_index=True)
+                st.dataframe(export_enriched_df, use_container_width=True, hide_index=True)
                 
             with sub_tab2:
                 st.markdown("#### Status Mismatches (Sheet 2)")
-                if disc_df.empty:
+                if export_disc_df.empty:
                     st.success("🎉 No status mismatches found!")
                 else:
-                    st.warning(f"⚠️ Found {len(disc_df)} status mismatches.")
-                    st.dataframe(disc_df, use_container_width=True, hide_index=True)
+                    st.warning(f"⚠️ Found {len(export_disc_df)} status mismatches.")
+                    st.dataframe(export_disc_df, use_container_width=True, hide_index=True)
         
 
 
