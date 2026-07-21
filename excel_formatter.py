@@ -322,43 +322,55 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
 
 def generate_fast_excel_bytes(sheet_dict):
     """
-    Ultra-fast Excel writer using xlsxwriter for large datasets (e.g. 50,000+ rows).
+    Ultra-fast Excel writer using xlsxwriter with openpyxl fallback.
     sheet_dict: dict of {"Sheet Name": dataframe}
     Returns bytes object of Excel file.
     """
     import io
     excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        header_fmt = workbook.add_format({
-            'bold': True,
-            'bg_color': '#F2F2F2',
-            'border': 1,
-            'align': 'center',
-            'valign': 'vcenter'
-        })
-        
-        for sheet_name, df in sheet_dict.items():
-            if df is None:
-                df = pd.DataFrame()
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-            worksheet = writer.sheets[sheet_name]
+    
+    try:
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            header_fmt = workbook.add_format({
+                'bold': True,
+                'bg_color': '#F2F2F2',
+                'border': 1,
+                'align': 'center',
+                'valign': 'vcenter'
+            })
             
-            # Format header row
-            for col_num, value in enumerate(df.columns):
-                worksheet.write(0, col_num, value, header_fmt)
+            for sheet_name, df in sheet_dict.items():
+                if df is None:
+                    df = pd.DataFrame()
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                worksheet = writer.sheets[sheet_name]
                 
-            # Autofit column widths using vectorized length max
-            for col_idx, col_name in enumerate(df.columns):
-                max_len = 0
-                if not df.empty:
-                    val = df[col_name].astype(str).str.len().max()
-                    if pd.notna(val):
-                        max_len = int(val)
-                header_len = len(str(col_name))
-                width = max(max(max_len, header_len) + 3, 12)
-                worksheet.set_column(col_idx, col_idx, width)
-                
-    return excel_buffer.getvalue()
+                # Format header row
+                for col_num, value in enumerate(df.columns):
+                    worksheet.write(0, col_num, value, header_fmt)
+                    
+                # Autofit column widths using vectorized length max
+                for col_idx, col_name in enumerate(df.columns):
+                    max_len = 0
+                    if not df.empty:
+                        val = df[col_name].astype(str).str.len().max()
+                        if pd.notna(val):
+                            max_len = int(val)
+                    header_len = len(str(col_name))
+                    width = max(max(max_len, header_len) + 3, 12)
+                    worksheet.set_column(col_idx, col_idx, width)
+        return excel_buffer.getvalue()
+    except Exception:
+        # Fallback to openpyxl with fast formatting if xlsxwriter is missing
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            for sheet_name, df in sheet_dict.items():
+                if df is None:
+                    df = pd.DataFrame()
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                if sheet_name in writer.sheets:
+                    format_data_sheet(writer.sheets[sheet_name], df)
+        return excel_buffer.getvalue()
     
     return wb
