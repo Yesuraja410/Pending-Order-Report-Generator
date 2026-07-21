@@ -158,6 +158,35 @@ def _find_column(df, candidates):
                 return col
     return None
 
+def _build_seller_email_map(df_contacts):
+    """
+    Build a {seller_name (cleaned) -> email} lookup from an uploaded contacts
+    file. Expects a seller/store name column (e.g. "Seller Name", "Store",
+    "Nickname") and an email column (e.g. "Email", "Seller Email"). Returns an
+    empty dict if no contacts file was supplied or the required columns
+    aren't found.
+    """
+    email_map = {}
+    if df_contacts is None or df_contacts.empty:
+        return email_map
+
+    name_col = _find_column(df_contacts, [
+        "Seller Name", "Seller", "Store Name", "Store", "Nickname", "Shop Name", "Shop"
+    ])
+    email_col = _find_column(df_contacts, [
+        "Email", "Seller Email", "Email Address", "Contact Email", "Recipient Email"
+    ])
+    if not name_col or not email_col:
+        return email_map
+
+    for _, row in df_contacts.iterrows():
+        seller_name = _clean_str(row.get(name_col, ""))
+        email = _clean_str(row.get(email_col, ""))
+        if seller_name and email and "@" in email:
+            email_map[seller_name.strip().lower()] = email
+
+    return email_map
+
 def _is_blank(val):
     """Check if a value is null, empty string, or nan/nat strings produced by Excel loading."""
     s = str(val).strip().replace('\r', '').replace('\n', '')
@@ -409,7 +438,7 @@ def fetch_pending_from_mcp():
     except Exception as e:
         raise ValueError(f"Failed to fetch pending orders from DB: {str(e)}")
 
-def run_gsheet_oms_validation(df_pending, df_oms):
+def run_gsheet_oms_validation(df_pending, df_oms, df_contacts=None):
     # Find ID and nickname/store column in Pending Order Report
     pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     pend_sla_col = _find_column(df_pending, ["mp_sla_date", "SLA", "SLA Date", "SLA_Date", "Ship By Date", "ship_by_date", "mp_sla_date_updated"])
@@ -738,15 +767,17 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
 
     # Seller grouping
+    seller_email_map = _build_seller_email_map(df_contacts)
     seller_groups = {}
     stores = df_pending[target_store_col].unique()
     for store in stores:
         store_clean = _clean_str(store)
         store_df = df_pending[df_pending[target_store_col] == store].copy()
-        store_df["Seller Email"] = ""
+        matched_email = seller_email_map.get(store_clean.strip().lower(), "")
+        store_df["Seller Email"] = matched_email
         seller_groups[store_clean] = {
             "df": store_df,
-            "email": ""
+            "email": matched_email
         }
 
     # Country-specific reports
@@ -835,7 +866,8 @@ def run_gsheet_oms_validation(df_pending, df_oms):
         "pushed_count": pushed_count,
         "not_pushed_count": not_pushed_count,
         "unpaid_count": unpaid_count,
-        "total_sellers": len(seller_groups)
+        "total_sellers": len(seller_groups),
+        "mode": "gsheet_oms"
     }
 
     return {
@@ -1796,7 +1828,7 @@ def process_and_validate_orders(pending_file, tc_file, *args, **kwargs):
         
     # Mode 1: GSheet + OMS Report Alone
     elif has_pending and has_oms and not has_tc and not has_marketplace:
-        return run_gsheet_oms_validation(df_pending, df_oms)
+        return run_gsheet_oms_validation(df_pending, df_oms, df_contacts)
         
     # Default Mode 3/4: standard validation with combined TC + Marketplace reports
     else:
@@ -2619,7 +2651,8 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         "pushed_count": pushed_count,
         "not_pushed_count": not_pushed_count,
         "unpaid_count": unpaid_count,
-        "total_sellers": len(seller_groups)
+        "total_sellers": len(seller_groups),
+        "mode": "standard"
     }
 
     ref_date_dmy = ""
