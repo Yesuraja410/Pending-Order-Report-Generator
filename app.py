@@ -457,7 +457,7 @@ else:
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Order Flow Check Report (Styled)</h3>', unsafe_allow_html=True)
             
-            cols_to_drop_consolidated = ["Details", "Final Remarks", "_country", "Correct Order Number", "SLA Source"]
+            cols_to_drop_consolidated = ["Details", "Final Remarks", "_country", "Correct Order Number", "SLA Source", "SLA Date", "SLA", "sla_status"]
             cols_to_drop_mismatches = ["SLA Date", "SLA", "sla_status", "Details", "Final Remarks", "Correct Order Number", "SLA Source", "_country"]
             
             export_enriched_df = enriched_df.drop(columns=[c for c in cols_to_drop_consolidated if c in enriched_df.columns], errors="ignore")
@@ -501,7 +501,7 @@ else:
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Status Reconciliation Report (Styled)</h3>', unsafe_allow_html=True)
             
-            cols_to_drop_consolidated = ["Details", "Final Remarks", "_country", "Correct Order Number", "SLA Source"]
+            cols_to_drop_consolidated = ["Details", "Final Remarks", "_country", "Correct Order Number", "SLA Source", "SLA Date", "SLA", "sla_status"]
             cols_to_drop_mismatches = ["SLA Date", "SLA", "sla_status", "Details", "Final Remarks", "Correct Order Number", "SLA Source", "_country"]
             
             export_enriched_df = enriched_df.drop(columns=[c for c in cols_to_drop_consolidated if c in enriched_df.columns], errors="ignore")
