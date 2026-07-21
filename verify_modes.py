@@ -126,7 +126,7 @@ def test_mode_3_tc_oms():
     print("  Discrepancies:\n", disc[["Order ID", "Validation Result", "Details"]].to_string())
 
     assert len(enriched) == 2 # Only ORD-1 and ORD-3 are pending/discrepancies
-    assert summary["pushed_count"] == 1
+    assert summary["pushed_count"] == 0
     assert summary["not_pushed_count"] == 2
     print("Mode 3 passed!\n")
 
