@@ -981,6 +981,16 @@ def resolve_marketplace_order_id_col(channel_name, columns):
                 return col
     return columns[0] if len(columns) > 0 else None
 
+def is_ignored_tiktok(val):
+    if not val:
+        return False
+    s = str(val).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    if s in ("tiktokph", "tiktoksg", "tiktoksingapore", "tiktokpumasingapore", "tiktokpumasg"):
+        return True
+    if "tiktok" in s and ("ph" in s or "sg" in s or "singapore" in s):
+        return True
+    return False
+
 def load_and_preprocess_marketplace_files(marketplace_files):
     if not isinstance(marketplace_files, list):
         marketplace_files = [marketplace_files]
@@ -992,6 +1002,8 @@ def load_and_preprocess_marketplace_files(marketplace_files):
             continue
             
         channel_detected = detect_dataframe_channel(sub_df)
+        if is_ignored_tiktok(channel_detected):
+            continue
         ord_id_col = resolve_marketplace_order_id_col(channel_detected, sub_df.columns)
         if not ord_id_col:
             continue
@@ -1218,16 +1230,25 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     oms_pay_status_col = _find_column(df_oms, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"]) if df_oms is not None else None
     oms_pay_method_col = _find_column(df_oms, ["payment_methods", "Payment Method", "Payment_Method", "PaymentMethod", "Payment Type"]) if df_oms is not None else None
 
-    # Filter out TikTok PH from input datasets
-    is_tiktok_ph = lambda x: str(x).strip().lower().replace(" ", "").replace("-", "").replace("_", "") == "tiktokph"
+    # Filter out TikTok PH and TikTok SG/Singapore from input datasets
+    def is_ignored_tiktok(val):
+        if not val:
+            return False
+        s = str(val).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+        if s in ("tiktokph", "tiktoksg", "tiktoksingapore", "tiktokpumasingapore", "tiktokpumasg"):
+            return True
+        if "tiktok" in s and ("ph" in s or "sg" in s or "singapore" in s):
+            return True
+        return False
+
     if not df_tc.empty and tc_store_col and tc_store_col in df_tc.columns:
-        df_tc = df_tc[~df_tc[tc_store_col].apply(is_tiktok_ph)].copy()
+        df_tc = df_tc[~df_tc[tc_store_col].apply(is_ignored_tiktok)].copy()
     if df_marketplace is not None and not df_marketplace.empty:
         mp_store_col = _find_column(df_marketplace, ["nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
         if mp_store_col and mp_store_col in df_marketplace.columns:
-            df_marketplace = df_marketplace[~df_marketplace[mp_store_col].apply(is_tiktok_ph)].copy()
+            df_marketplace = df_marketplace[~df_marketplace[mp_store_col].apply(is_ignored_tiktok)].copy()
     if df_oms is not None and not df_oms.empty and oms_store_col and oms_store_col in df_oms.columns:
-        df_oms = df_oms[~df_oms[oms_store_col].apply(is_tiktok_ph)].copy()
+        df_oms = df_oms[~df_oms[oms_store_col].apply(is_ignored_tiktok)].copy()
 
     # Clean IDs
     if not df_tc.empty and tc_id_col:
@@ -1241,9 +1262,9 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     tc_id_to_num = {}
     tc_num_to_id = {}
     if not df_tc.empty and tc_id_col and tc_num_col and tc_id_col != tc_num_col:
-        for _, row in df_tc.iterrows():
-            oid = row[tc_id_col]
-            onum = row[tc_num_col]
+        for row in df_tc.to_dict('records'):
+            oid = row.get(tc_id_col)
+            onum = row.get(tc_num_col)
             if oid and onum:
                 tc_id_to_num[oid] = onum
                 tc_num_to_id[onum] = oid
@@ -1254,8 +1275,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     oms_pay_status_map = {}
     oms_pay_method_map = {}
     if df_oms is not None and not df_oms.empty and oms_id_col:
-        for _, row in df_oms.iterrows():
-            oid = _clean_order_id(row[oms_id_col])
+        for row in df_oms.to_dict('records'):
+            oid = _clean_order_id(row.get(oms_id_col))
             if not oid:
                 continue
             ean = normalize_ean(row.get(oms_ean_col)) if oms_ean_col else ""
@@ -1289,7 +1310,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         if not df_tc.empty and tc_num_col:
             tc_ids.update(df_tc[tc_num_col].dropna().astype(str).str.strip().tolist())
             
-        for idx, mp_row in df_marketplace.iterrows():
+        for mp_row in df_marketplace.to_dict('records'):
             mp_oid = str(mp_row.get("Correct Order Number", "")).strip()
             if not mp_oid:
                 continue
@@ -1318,8 +1339,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 main_rows.append(flow_disc)
                 discrepancy_rows.append(flow_disc)
 
-    # Process all rows from df_tc for complete status reconciliation
-    tc_rows = [row for _, row in df_tc.iterrows()]
+    # Process all rows from df_tc for complete status reconciliation (optimized using to_dict)
+    tc_rows = df_tc.to_dict('records')
 
     for row in tc_rows:
         oid_str = _clean_order_id(row.get(tc_id_col, ""))
@@ -1437,7 +1458,15 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                     is_disc = True
 
                 # Rule 5: TC Returned but OMS not Returned
-                if ("returned" in tc_stat_norm or "return" in tc_stat_norm) and not ("returned" in oms_stat.lower() or "return" in oms_stat.lower()):
+                tc_is_return = ("returned" in tc_stat_norm or "return" in tc_stat_norm or "returned" in tc_item_stat_norm or "return" in tc_item_stat_norm)
+                oms_is_delivered = ("delivered" in oms_stat.lower())
+                
+                if tc_is_return and oms_is_delivered:
+                    val_result = "Returned (Ignored)"
+                    details = f"TC status is '{tc_stat}', but OMS status is Delivered (Ignored per rule)."
+                    final_remarks = f"Successfully Pushed to OMS ({oms_stat})"
+                    is_disc = False
+                elif tc_is_return and not ("returned" in oms_stat.lower() or "return" in oms_stat.lower()):
                     val_result = "TC Returned but OMS not Returned"
                     details = f"TC status is Returned, but OMS status is '{oms_stat}'."
                     final_remarks = "TC Returned but OMS not Returned"
