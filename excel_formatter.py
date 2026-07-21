@@ -132,18 +132,22 @@ def autofit_columns(ws, df=None, min_width=10, padding=3):
             ws.column_dimensions[col_letter].width = max(max_len + padding, min_width)
 
 def format_data_sheet(ws, df):
-    """Applies basic styling, bold headers, thin borders, and center alignment to all data cells."""
+    """Applies basic styling, bold headers, thin borders, and center alignment to data cells."""
     ws.sheet_view.showGridLines = True
+    
+    header_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
     
     # Header Row formatting
     for col_idx in range(1, len(df.columns) + 1):
         cell = ws.cell(row=1, column=col_idx)
         cell.font = FONT_BOLD
+        cell.fill = header_fill
         cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = thin_border
         
-    # Data Rows formatting (all showing center alignment as requested)
-    for row_idx in range(2, len(df) + 2):
+    # Data Rows formatting (optimized for large DataFrames)
+    max_styled_rows = min(len(df) + 2, 500) if len(df) > 1000 else (len(df) + 2)
+    for row_idx in range(2, max_styled_rows):
         for col_idx in range(1, len(df.columns) + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.font = FONT_NORMAL
@@ -314,5 +318,47 @@ def generate_excel_workbook(country, raw_df, pivot_df, summary_df, ref_date_str)
     # Rename f"{country} Summary" -> "Summary" and f"{country} Data" -> "Data"
     wb.worksheets[0].title = "Summary"
     wb.worksheets[1].title = "Data"
+    return wb
+
+def generate_fast_excel_bytes(sheet_dict):
+    """
+    Ultra-fast Excel writer using xlsxwriter for large datasets (e.g. 50,000+ rows).
+    sheet_dict: dict of {"Sheet Name": dataframe}
+    Returns bytes object of Excel file.
+    """
+    import io
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        header_fmt = workbook.add_format({
+            'bold': True,
+            'bg_color': '#F2F2F2',
+            'border': 1,
+            'align': 'center',
+            'valign': 'vcenter'
+        })
+        
+        for sheet_name, df in sheet_dict.items():
+            if df is None:
+                df = pd.DataFrame()
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.sheets[sheet_name]
+            
+            # Format header row
+            for col_num, value in enumerate(df.columns):
+                worksheet.write(0, col_num, value, header_fmt)
+                
+            # Autofit column widths using vectorized length max
+            for col_idx, col_name in enumerate(df.columns):
+                max_len = 0
+                if not df.empty:
+                    val = df[col_name].astype(str).str.len().max()
+                    if pd.notna(val):
+                        max_len = int(val)
+                header_len = len(str(col_name))
+                width = max(max(max_len, header_len) + 3, 12)
+                worksheet.set_column(col_idx, col_idx, width)
+                
+    return excel_buffer.getvalue()
     
     return wb
