@@ -125,8 +125,8 @@ def test_mode_3_tc_oms():
     print("  Enriched Pending list (extracted from TC):\n", enriched[["Order ID", "OMS Order Status", "Final Remarks"]].to_string())
     print("  Discrepancies:\n", disc[["Order ID", "Validation Result", "Details"]].to_string())
 
-    assert len(enriched) == 2 # Only ORD-1 and ORD-3 are pending/discrepancies
-    assert summary["pushed_count"] == 0
+    assert len(enriched) == 3 # All 3 TC orders are validated against OMS in complete reconciliation mode
+    assert summary["pushed_count"] == 1
     assert summary["not_pushed_count"] == 2
     print("Mode 3 passed!\n")
 
