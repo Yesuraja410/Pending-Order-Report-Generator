@@ -1406,16 +1406,24 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         is_disc = False
 
         if is_active_in_tc and not oms_stat:
-            val_result = "Not Pushed to OMS"
-            details = "Paid or COD order is present in TC but missing from OMS Report."
-            final_remarks = "Not Pushed to OMS"
-            is_disc = True
+            tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
+            if tc_return:
+                val_result = "Returned (Ignored)"
+                details = f"TC status is '{tc_stat or tc_item_stat}' (Return requested/accepted is not pushed to OMS)."
+                final_remarks = "Returned (Ignored)"
+                is_disc = False
+            else:
+                val_result = "Not Pushed to OMS"
+                details = "Paid or COD order is present in TC but missing from OMS Report."
+                final_remarks = "Not Pushed to OMS"
+                is_disc = True
         elif not oms_stat:
             tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
-            if tc_cancelled:
-                val_result = "Cancelled (Ignored)"
-                details = "Order is Cancelled in TC and missing from OMS."
-                final_remarks = "Cancelled (Ignored)"
+            tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
+            if tc_cancelled or tc_return:
+                val_result = "Returned/Cancelled (Ignored)"
+                details = f"TC status is '{tc_stat or tc_item_stat}' and missing from OMS."
+                final_remarks = "Returned/Cancelled (Ignored)"
                 is_disc = False
             else:
                 val_result = "Not in OMS"
@@ -1423,15 +1431,21 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 final_remarks = "Not in OMS"
                 is_disc = True
         elif oms_stat:
+            tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
             tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
             oms_cancelled = ("cancel" in oms_stat.lower() or "void" in oms_stat.lower())
             
-            if tc_cancelled and not oms_cancelled:
-                if "return" not in oms_stat.lower():
-                    val_result = "Cancelled Status Mismatch"
-                    details = f"Order is Cancelled in TC, but OMS shows status '{oms_stat}'."
-                    final_remarks = "Cancelled Status Mismatch"
-                    is_disc = True
+            if tc_return:
+                # Return Requested / Return Accepted in TC is NOT a status mismatch vs OMS
+                val_result = "Returned (Ignored)"
+                details = f"TC status is '{tc_stat or tc_item_stat}', OMS status is '{oms_stat}' (Return requested/accepted is not pushed to OMS - Ignored)."
+                final_remarks = f"Successfully Pushed to OMS ({oms_stat})"
+                is_disc = False
+            elif tc_cancelled and not oms_cancelled:
+                val_result = "Cancelled Status Mismatch"
+                details = f"Order is Cancelled in TC, but OMS shows status '{oms_stat}'."
+                final_remarks = "Cancelled Status Mismatch"
+                is_disc = True
             elif not tc_cancelled and oms_cancelled:
                 val_result = "Cancelled Status Mismatch"
                 details = f"Order is Cancelled in OMS, but TC status is '{tc_stat}'."
@@ -1459,21 +1473,6 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                     val_result = "TC Delivered but OMS not Delivered"
                     details = f"TC status is Delivered, but OMS status is '{oms_stat}'."
                     final_remarks = "TC Delivered but OMS not Delivered"
-                    is_disc = True
-
-                # Rule 5: TC Returned but OMS not Returned
-                tc_is_return = ("returned" in tc_stat_norm or "return" in tc_stat_norm or "returned" in tc_item_stat_norm or "return" in tc_item_stat_norm)
-                oms_is_delivered = ("delivered" in oms_stat.lower())
-                
-                if tc_is_return and oms_is_delivered:
-                    val_result = "Returned (Ignored)"
-                    details = f"TC status is '{tc_stat}', but OMS status is Delivered (Ignored per rule)."
-                    final_remarks = f"Successfully Pushed to OMS ({oms_stat})"
-                    is_disc = False
-                elif tc_is_return and not ("returned" in oms_stat.lower() or "return" in oms_stat.lower()):
-                    val_result = "TC Returned but OMS not Returned"
-                    details = f"TC status is Returned, but OMS status is '{oms_stat}'."
-                    final_remarks = "TC Returned but OMS not Returned"
                     is_disc = True
 
                 # Rule 6: TC Delivery Failed but OMS not Returned
