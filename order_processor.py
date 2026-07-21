@@ -1416,13 +1416,25 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         item_norm = tc_item_stat_norm if tc_item_stat_norm else tc_stat_norm
         line_norm = _clean_str(oms_line_stat).lower() if oms_line_stat else _clean_str(oms_stat).lower()
 
+        # NOTE on tc_is_return: "returned" (final/terminal) is treated separately
+        # from in-progress return states like "RETURN ACCEPTED", "RETURN
+        # REQUESTED", "RETURN SHIPPED". Per the Status Mismatch reference sheet,
+        # only the terminal "Returned" status should be compared against OMS
+        # (and flagged if OMS hasn't caught up); in-progress return states are
+        # always ignored regardless of what OMS currently shows.
+        tc_is_return_final = (item_norm.strip() == "returned")
         tc_is_return = ("return" in item_norm)
+        tc_is_return_progress = tc_is_return and not tc_is_return_final
         tc_is_cancelled = ("cancel" in item_norm or "lost" in item_norm or "refund" in item_norm)
         tc_is_failed = ("failed" in item_norm)
         tc_is_delivered = ("delivered" in item_norm)
         tc_is_new = ("new" in item_norm)
         tc_is_ready = ("ready" in item_norm or "to_ship" in item_norm or tc_is_new)
         is_active_in_tc = tc_is_new or tc_is_ready
+        tc_is_blank = (item_norm == "")
+        tc_is_plain_shipped = ("shipped" in item_norm) and not (
+            tc_is_new or tc_is_ready or tc_is_delivered or tc_is_return or tc_is_cancelled or tc_is_failed
+        )
 
         oms_is_returned = ("return" in line_norm)
         oms_is_cancelled = ("cancel" in line_norm or "void" in line_norm or "refund" in line_norm)
@@ -1435,17 +1447,29 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Successfully Pushed to OMS"
         is_disc = False
 
-        if tc_is_return:
-            if oms_is_shipped or oms_is_packed:
-                val_result = "TC Returned but OMS not Returned"
+        if tc_is_return_final:
+            # FIX: previously only checked oms_is_shipped/oms_is_packed, so
+            # Returned(TC) + Delivered(OMS) silently passed as "Ignored". Per
+            # the reference sheet this combination must be flagged.
+            if oms_is_shipped or oms_is_packed or oms_is_delivered:
+                val_result = "Need to push Returned Status"
                 details = f"TC Item Status is Returned, but OMS Line Status is '{oms_line_stat}'."
-                final_remarks = "TC Returned but OMS not Returned"
+                final_remarks = "Need to push Returned Status"
                 is_disc = True
             else:
                 val_result = "Returned (Ignored)"
-                details = f"TC Item Status is '{tc_item_stat or tc_stat}', OMS Line Status is '{oms_line_stat}' (Return requested/accepted is ignored)."
+                details = f"TC Item Status is '{tc_item_stat or tc_stat}', OMS Line Status is '{oms_line_stat}' (Returned/Cancelled in OMS is a valid end-state - Ignored)."
                 final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Returned (Ignored)"
                 is_disc = False
+
+        elif tc_is_return_progress:
+            # Return Requested/Accepted/Shipped are in-progress states in TC -
+            # OMS can legitimately show a variety of statuses while the return
+            # is being processed, so this is never treated as a mismatch.
+            val_result = "Returned (Ignored)"
+            details = f"TC Item Status is '{tc_item_stat or tc_stat}' (return in progress), OMS Line Status is '{oms_line_stat}' - Ignored."
+            final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Returned (Ignored)"
+            is_disc = False
 
         elif tc_is_failed and (oms_is_returned or oms_is_cancelled or oms_is_delivered):
             # Delivery failed orders returned to warehouse - Ignored
@@ -1479,16 +1503,36 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             final_remarks = "Not in OMS"
             is_disc = True
 
-        elif oms_is_cancelled and not (tc_is_cancelled or tc_is_return or tc_is_failed):
+        elif tc_is_blank and oms_is_delivered:
+            # TC Item Status missing but OMS already shows Delivered - flag per
+            # reference sheet (previously fell through to a silent "OK").
+            val_result = "Need to push Returned Status"
+            details = f"TC Item Status is missing/blank, but OMS Line Status is '{oms_line_stat}'."
+            final_remarks = "Need to push Returned Status"
+            is_disc = True
+
+        elif oms_is_cancelled and not (tc_is_cancelled or tc_is_return_final or tc_is_return_progress or tc_is_failed or tc_is_delivered):
             val_result = "Cancelled Status Mismatch"
             details = f"OMS Line Status is Cancelled, but TC Item Status is '{tc_item_stat or tc_stat}'."
             final_remarks = "Cancelled Status Mismatch"
             is_disc = True
 
-        elif tc_is_delivered and not oms_is_delivered:
+        elif tc_is_delivered and not (oms_is_delivered or oms_is_returned or oms_is_cancelled):
+            # FIX: Delivered(TC) + Returned(OMS) and Delivered(TC) + Cancelled(OMS)
+            # are both valid "OK" end-states per the reference sheet and must
+            # not be flagged - only an in-transit OMS status (Shipped/Packed)
+            # while TC already shows Delivered is a genuine mismatch.
             val_result = "TC Delivered but OMS not Delivered"
             details = f"TC Item Status is Delivered, but OMS Line Status is '{oms_line_stat}'."
             final_remarks = "TC Delivered but OMS not Delivered"
+            is_disc = True
+
+        elif tc_is_plain_shipped and oms_is_delivered:
+            # TC still shows plain "Shipped" while OMS has already moved to
+            # Delivered - previously no branch caught this at all.
+            val_result = "Need to push Shipped status to TC"
+            details = f"TC Item Status is Shipped, but OMS Line Status is already '{oms_line_stat}'."
+            final_remarks = "Need to push Shipped status to TC"
             is_disc = True
 
         elif oms_is_shipped and tc_is_ready and not tc_is_delivered:
@@ -2198,12 +2242,28 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         oms_line_norm = _normalize_status_val(oms_line_status)
 
         # Rule 1: Cancelled status check
-        is_tc_cancelled = ("cancel" in tc_item_norm)
+        # NOTE: "lost" (e.g. LOST_BY_3PL) and "refund" are treated the same as
+        # "cancel" here - previously only "cancel" was checked, so LOST_BY_3PL
+        # rows never triggered any discrepancy at all (Status Mismatch sheet
+        # row: LOST_BY_3PL / SHIPPED -> Status Mismatch).
+        is_tc_cancelled = ("cancel" in tc_item_norm or "lost" in tc_item_norm or "refund" in tc_item_norm)
         is_oms_cancelled = ("cancel" in oms_line_norm)
         if (is_tc_cancelled or is_oms_cancelled) and (is_tc_cancelled != is_oms_cancelled):
-            # Exception: TC cancelled and OMS Returned can ignore
+            # Exceptions per the Status Mismatch reference sheet - all of these
+            # are valid "OK" / ignored combinations, not mismatches:
+            #  - TC Cancelled + OMS Returned
+            #  - TC Cancelled + order missing/blank in OMS ("Not in OMS")
+            #  - TC Delivered + OMS Cancelled
+            #  - TC Returned (final) + OMS Cancelled
             is_oms_returned = ("return" in oms_line_norm)
-            if not (is_tc_cancelled and is_oms_returned):
+            is_oms_not_in_oms = (oms_line_norm == "" or "not in oms" in oms_line_norm)
+            is_tc_delivered_chk = ("delivered" in tc_item_norm)
+            is_tc_returned_final_chk = (tc_item_norm.strip() == "returned")
+            skip_flag = (
+                (is_tc_cancelled and (is_oms_returned or is_oms_not_in_oms))
+                or (is_oms_cancelled and (is_tc_delivered_chk or is_tc_returned_final_chk))
+            )
+            if not skip_flag:
                 discrepancies.append({
                     "Order ID": oid,
                     "Nickname": nickname_val,
@@ -2251,7 +2311,12 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                 })
 
         # Rule 4: If TC Status is Delivered and OMS status not Delivered can highlight
-        if "delivered" in tc_item_norm and "delivered" not in oms_line_norm:
+        # FIX: Delivered/Returned and Delivered/Cancelled are both valid terminal
+        # combinations per the Status Mismatch reference sheet (Validation Result:
+        # "OK", not included in the mismatch sheet) - only flag when OMS is still
+        # showing an in-transit state (e.g. Shipped/Packed), not when it has
+        # already reached another valid end-state (Returned/Cancelled).
+        if "delivered" in tc_item_norm and not any(x in oms_line_norm for x in ["delivered", "return", "cancel"]):
             discrepancies.append({
                 "Order ID": oid,
                 "Nickname": nickname_val,
@@ -2265,7 +2330,9 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             })
 
         # Rule 5: If TC Status is Returned and OMS Status not Returned can highlight
-        if "returned" in tc_item_norm and not ("returned" in oms_line_norm or "return" in oms_line_norm):
+        # FIX: Returned/Cancelled is a valid "OK" combination per the reference
+        # sheet and should not be flagged (previously it was).
+        if "returned" in tc_item_norm and not ("returned" in oms_line_norm or "return" in oms_line_norm or "cancel" in oms_line_norm):
             discrepancies.append({
                 "Order ID": oid,
                 "Nickname": nickname_val,
@@ -2276,6 +2343,43 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                 "OMS Order Status": oms_order_status,
                 "OMS Line Status": oms_line_status,
                 "Details": f"TC status is Returned, but OMS status is '{oms_line_status}'."
+            })
+
+        # Rule 5b: TC Item Status is blank/missing but OMS already shows Delivered.
+        # Per the Status Mismatch reference sheet this should be flagged as
+        # "Need to push Returned Status" (previously this fell through every
+        # rule above and was silently marked OK).
+        if not tc_item_norm and "delivered" in oms_line_norm:
+            discrepancies.append({
+                "Order ID": oid,
+                "Nickname": nickname_val,
+                "SKU": sku,
+                "Validation Result": "Need to push Returned Status",
+                "TC Order Status": tc_order_status,
+                "TC Item Status": tc_item_status,
+                "OMS Order Status": oms_order_status,
+                "OMS Line Status": oms_line_status,
+                "Details": f"TC Item Status is missing/blank, but OMS status is '{oms_line_status}'."
+            })
+
+        # Rule 5c: TC Item Status is plain "Shipped" (not New/Ready/Accepted/
+        # Picked/Cancelled/Returned/Delivered/Failed) but OMS already shows
+        # Delivered. Per the reference sheet: "Need to push Shipped status to TC".
+        # Previously no rule caught this combination at all.
+        tc_is_plain_shipped = "shipped" in tc_item_norm and not any(
+            x in tc_item_norm for x in ["new", "ready", "accepted", "picked", "cancel", "return", "delivered", "failed", "lost"]
+        )
+        if tc_is_plain_shipped and "delivered" in oms_line_norm:
+            discrepancies.append({
+                "Order ID": oid,
+                "Nickname": nickname_val,
+                "SKU": sku,
+                "Validation Result": "Need to push Shipped status to TC",
+                "TC Order Status": tc_order_status,
+                "TC Item Status": tc_item_status,
+                "OMS Order Status": oms_order_status,
+                "OMS Line Status": oms_line_status,
+                "Details": f"TC status is Shipped, but OMS status is already '{oms_line_status}'."
             })
 
         # Rule 6: If TC Status Delivery Failed and OMS not Returned can highlight
