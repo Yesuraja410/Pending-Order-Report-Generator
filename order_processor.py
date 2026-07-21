@@ -1436,11 +1436,16 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         is_disc = False
 
         if tc_is_return:
-            # Return requested/accepted on marketplace is not pushed to OMS - Ignored
-            val_result = "Returned (Ignored)"
-            details = f"TC Item Status is '{tc_item_stat or tc_stat}', OMS Line Status is '{oms_line_stat}' (Return requested/accepted is ignored)."
-            final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Returned (Ignored)"
-            is_disc = False
+            if oms_is_shipped or oms_is_packed:
+                val_result = "TC Returned but OMS not Returned"
+                details = f"TC Item Status is Returned, but OMS Line Status is '{oms_line_stat}'."
+                final_remarks = "TC Returned but OMS not Returned"
+                is_disc = True
+            else:
+                val_result = "Returned (Ignored)"
+                details = f"TC Item Status is '{tc_item_stat or tc_stat}', OMS Line Status is '{oms_line_stat}' (Return requested/accepted is ignored)."
+                final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Returned (Ignored)"
+                is_disc = False
 
         elif tc_is_failed and (oms_is_returned or oms_is_cancelled or oms_is_delivered):
             # Delivery failed orders returned to warehouse - Ignored
