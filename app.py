@@ -433,14 +433,11 @@ else:
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Missing Orders Report (Styled)</h3>', unsafe_allow_html=True)
             
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                enriched_df.to_excel(writer, sheet_name="Missing Orders", index=False)
-                excel_formatter.format_data_sheet(writer.sheets["Missing Orders"], enriched_df)
+            excel_bytes_data = excel_formatter.generate_fast_excel_bytes({"Missing Orders": enriched_df})
                 
             st.download_button(
                 label="📥 Download Missing Orders Report",
-                data=excel_buffer.getvalue(),
+                data=excel_bytes_data,
                 file_name=f"Missing Orders Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
@@ -460,18 +457,15 @@ else:
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Order Flow Check Report (Styled)</h3>', unsafe_allow_html=True)
             
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
-                export_enriched_df.to_excel(writer, sheet_name="Consolidated Report", index=False)
-                disc_df.to_excel(writer, sheet_name="Missing & Mismatch Orders", index=False)
-                
-                excel_formatter.format_data_sheet(writer.sheets["Consolidated Report"], export_enriched_df)
-                excel_formatter.format_data_sheet(writer.sheets["Missing & Mismatch Orders"], disc_df)
+            export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+            excel_bytes_data = excel_formatter.generate_fast_excel_bytes({
+                "Consolidated Report": export_enriched_df,
+                "Missing & Mismatch Orders": disc_df
+            })
                 
             st.download_button(
                 label="📥 Download Order Flow Check Report",
-                data=excel_buffer.getvalue(),
+                data=excel_bytes_data,
                 file_name=f"Order Flow Check Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
@@ -503,18 +497,15 @@ else:
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
             st.markdown('<h3 class="download-header">📥 Download Status Reconciliation Report (Styled)</h3>', unsafe_allow_html=True)
             
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
-                export_enriched_df.to_excel(writer, sheet_name="Consolidated Report", index=False)
-                disc_df.to_excel(writer, sheet_name="Status Mismatches", index=False)
-                
-                excel_formatter.format_data_sheet(writer.sheets["Consolidated Report"], export_enriched_df)
-                excel_formatter.format_data_sheet(writer.sheets["Status Mismatches"], disc_df)
+            export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+            excel_bytes_data = excel_formatter.generate_fast_excel_bytes({
+                "Consolidated Report": export_enriched_df,
+                "Status Mismatches": disc_df
+            })
                 
             st.download_button(
                 label="📥 Download Status Reconciliation Report",
-                data=excel_buffer.getvalue(),
+                data=excel_bytes_data,
                 file_name=f"Status reconciliation Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
