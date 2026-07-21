@@ -640,7 +640,7 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                             "SKU": sku_val,
                             "Payment Status": pay_stat_val,
                             "Payment Method": pay_meth_val,
-                            "Validation Result": "TC Delivered but OMS not Delivered",
+                            "Validation Result": "Need to push Delivered Status",
                             "TC Order Status": pend_stat_raw,
                             "TC Item Status": pend_stat_raw,
                             "OMS Order Status": oms_stat,
@@ -1522,9 +1522,9 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             # are both valid "OK" end-states per the reference sheet and must
             # not be flagged - only an in-transit OMS status (Shipped/Packed)
             # while TC already shows Delivered is a genuine mismatch.
-            val_result = "TC Delivered but OMS not Delivered"
+            val_result = "Need to push Delivered Status"
             details = f"TC Item Status is Delivered, but OMS Line Status is '{oms_line_stat}'."
-            final_remarks = "TC Delivered but OMS not Delivered"
+            final_remarks = "Need to push Delivered Status"
             is_disc = True
 
         elif tc_is_plain_shipped and oms_is_delivered:
@@ -1552,6 +1552,18 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             details = f"TC Item Status is Delivery Failed, but OMS Line Status is '{oms_line_stat}'."
             final_remarks = "TC Delivery Failed but OMS not Returned"
             is_disc = True
+
+        # If it's not a real discrepancy, and TC Item Status and OMS Line
+        # Status are effectively the same status text (e.g. both "Cancelled",
+        # both "Returned"), show a plain "OK" instead of a descriptive
+        # ignored-reason label - the descriptive labels are only useful when
+        # the two sides actually differ.
+        if not is_disc:
+            _squash = lambda s: re.sub(r'[\s_\-/]+', '', s.strip().lower())
+            if _squash(item_norm) == _squash(line_norm):
+                val_result = "OK"
+                details = "TC Item Status and OMS Line Status match."
+                final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "OK"
 
         row_data = {
             "Order ID": oid_str,
@@ -2321,7 +2333,7 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
                 "Order ID": oid,
                 "Nickname": nickname_val,
                 "SKU": sku,
-                "Validation Result": "TC Delivered but OMS not Delivered",
+                "Validation Result": "Need to push Delivered Status",
                 "TC Order Status": tc_order_status,
                 "TC Item Status": tc_item_status,
                 "OMS Order Status": oms_order_status,
@@ -2397,39 +2409,51 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
             })
 
     # == Shopee Partial Cancellation Mismatch Filter ==
+    # PERF FIX: previously, for every order with a cancel mismatch, this
+    # re-scanned the *entire* tc_lookup/oms_lookup dictionaries (twice, via
+    # `next(...)` and again via list comprehensions) to find that order's
+    # items. That's O(orders * total_line_items) - on large TC/OMS reports
+    # (tens of thousands of rows) this was the single biggest slowdown in
+    # report generation. Grouping by Order ID once up-front makes the whole
+    # filter O(total_line_items) instead.
     filtered_discrepancies = []
     from collections import defaultdict
     order_discs = defaultdict(list)
     for disc in discrepancies:
         order_discs[disc["Order ID"]].append(disc)
 
+    tc_items_by_order = defaultdict(list)
+    for k, v in tc_lookup.items():
+        tc_items_by_order[v["Order ID"]].append(v)
+
+    oms_items_by_order = defaultdict(list)
+    for k, v in oms_lookup.items():
+        oms_items_by_order[v["Order ID"]].append(v)
+
     for oid, discs in order_discs.items():
         has_cancel_mismatch = any(d["Validation Result"] == "Cancelled Status Mismatch" for d in discs)
         if has_cancel_mismatch:
+            tc_items = tc_items_by_order.get(oid, [])
+            oms_items = oms_items_by_order.get(oid, [])
+
             # Check if this is a Shopee order
-            sample_key = next((k for k in tc_lookup if tc_lookup[k]["Order ID"] == oid), None)
-            if not sample_key:
-                sample_key = next((k for k in oms_lookup if oms_lookup[k]["Order ID"] == oid), None)
-                
+            sample_item = tc_items[0] if tc_items else (oms_items[0] if oms_items else None)
             is_shopee = False
-            if sample_key:
+            if sample_item is not None:
                 s_val = ""
-                if sample_key in tc_lookup and tc_store_col and tc_store_col in tc_lookup[sample_key]["Row"]:
-                    s_val = tc_lookup[sample_key]["Row"][tc_store_col]
-                elif sample_key in oms_lookup and "nickname" in oms_lookup[sample_key]["Row"]:
-                    s_val = oms_lookup[sample_key]["Row"].get("nickname", "")
-                elif sample_key in oms_lookup and "store" in oms_lookup[sample_key]["Row"]:
-                    s_val = oms_lookup[sample_key]["Row"].get("store", "")
-                
+                if tc_items and tc_store_col and tc_store_col in tc_items[0]["Row"]:
+                    s_val = tc_items[0]["Row"][tc_store_col]
+                elif oms_items and "nickname" in oms_items[0]["Row"]:
+                    s_val = oms_items[0]["Row"].get("nickname", "")
+                elif oms_items and "store" in oms_items[0]["Row"]:
+                    s_val = oms_items[0]["Row"].get("store", "")
+
                 _, chan = parse_country_and_channel(s_val)
                 if chan == "Shopee":
                     is_shopee = True
-                    
+
             if is_shopee:
                 # Get all items in TC and OMS for this Order ID to see if it's a partial cancellation
-                tc_items = [tc_lookup[k] for k in tc_lookup if tc_lookup[k]["Order ID"] == oid]
-                oms_items = [oms_lookup[k] for k in oms_lookup if oms_lookup[k]["Order ID"] == oid]
-                
                 tc_cancelled_count = sum(1 for item in tc_items if "cancel" in _normalize_status_val(item["Item Status"]))
                 oms_cancelled_count = sum(1 for item in oms_items if "cancel" in _normalize_status_val(item["Line Status"]))
                 
