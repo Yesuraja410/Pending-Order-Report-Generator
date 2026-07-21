@@ -1229,6 +1229,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     # Find column names in OMS
     oms_id_col = _find_column(df_oms, ["order_no", "order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
     oms_status_col = _find_column(df_oms, ["order_status", "OMS Status", "Order Status", "Status", "OMS_Status"])
+    oms_line_status_col = _find_column(df_oms, ["line_status", "OMS Line Status", "item_status", "order_item_status", "Line Status", "Line_Status", "oms_line_status"])
     oms_ean_col = _find_column(df_oms, ["ean", "EAN", "Ean", "item_sku", "SKU"])
     oms_store_col = _find_column(df_oms, ["store", "nickname", "Store Name", "Store", "Seller", "Seller Name", "Marketplace", "Shop Name", "Shop"])
     oms_pay_status_col = _find_column(df_oms, ["payment_status", "Payment Status", "Payment_Status", "PaymentStatus", "Payment"]) if df_oms is not None else None
@@ -1275,7 +1276,9 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
 
     # Build OMS status and payment lookup maps with concatenated Order ID + SKU keys
     oms_status_map = {}
+    oms_line_status_map = {}
     oms_order_status_fallback_map = {}
+    oms_line_status_fallback_map = {}
     oms_pay_status_map = {}
     oms_pay_method_map = {}
     if df_oms is not None and not df_oms.empty and oms_id_col:
@@ -1286,13 +1289,17 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             ean = normalize_ean(row.get(oms_ean_col)) if oms_ean_col else ""
             sku_raw = _clean_str(row.get(oms_ean_col, "")).lower() if oms_ean_col else ""
             stat_val = _clean_str(row.get(oms_status_col, "")) if oms_status_col else ""
+            line_stat_val = _clean_str(row.get(oms_line_status_col, "")) if oms_line_status_col else stat_val
             
             if ean:
                 oms_status_map[oid + ean] = stat_val
+                oms_line_status_map[oid + ean] = line_stat_val
             if sku_raw:
                 oms_status_map[oid + sku_raw] = stat_val
+                oms_line_status_map[oid + sku_raw] = line_stat_val
                 
             oms_order_status_fallback_map[oid] = stat_val
+            oms_line_status_fallback_map[oid] = line_stat_val
             if oms_pay_status_col:
                 oms_pay_status_map[oid] = _clean_str(row.get(oms_pay_status_col, ""))
             if oms_pay_method_col:
@@ -1334,6 +1341,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                     "SLA": "Unknown",
                     "sla_status": "Unknown",
                     "OMS Order Status": "N/A",
+                    "OMS Line Status": "N/A",
                     "Validation Result": "Order missing in TC",
                     "Details": "Order is present in Marketplace reports but completely missing from TC Order Report.",
                     "Final Remarks": "Order missing in TC",
@@ -1368,6 +1376,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             pay_meth = oms_pay_method_map[oid_str]
 
         oms_stat = ""
+        oms_line_stat = ""
         key1 = oid_str + ean_val if ean_val else ""
         key2 = oid_str + sku_raw_val if sku_raw_val else ""
         onum = tc_id_to_num.get(oid_str, "")
@@ -1376,16 +1385,25 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         
         if key1 and key1 in oms_status_map:
             oms_stat = oms_status_map[key1]
+            oms_line_stat = oms_line_status_map.get(key1, oms_stat)
         elif key2 and key2 in oms_status_map:
             oms_stat = oms_status_map[key2]
+            oms_line_stat = oms_line_status_map.get(key2, oms_stat)
         elif oid_str in oms_order_status_fallback_map:
             oms_stat = oms_order_status_fallback_map[oid_str]
+            oms_line_stat = oms_line_status_fallback_map.get(oid_str, oms_stat)
         elif key3 and key3 in oms_status_map:
             oms_stat = oms_status_map[key3]
+            oms_line_stat = oms_line_status_map.get(key3, oms_stat)
         elif key4 and key4 in oms_status_map:
             oms_stat = oms_status_map[key4]
+            oms_line_stat = oms_line_status_map.get(key4, oms_stat)
         elif onum and onum in oms_order_status_fallback_map:
             oms_stat = oms_order_status_fallback_map[onum]
+            oms_line_stat = oms_line_status_fallback_map.get(onum, oms_stat)
+
+        if not oms_line_stat:
+            oms_line_stat = oms_stat if oms_stat else "Not in OMS"
 
         store_val = _clean_str(row.get(tc_store_col, "")) if tc_store_col else "Default Store"
         store_val = re.sub(r'puma_', '', store_val, flags=re.IGNORECASE)
@@ -1405,22 +1423,28 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Successfully Pushed to OMS"
         is_disc = False
 
-        if is_active_in_tc and not oms_stat:
-            tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
-            if tc_return:
-                val_result = "Returned (Ignored)"
-                details = f"TC status is '{tc_stat or tc_item_stat}' (Return requested/accepted is not pushed to OMS)."
-                final_remarks = "Returned (Ignored)"
-                is_disc = False
-            else:
-                val_result = "Not Pushed to OMS"
-                details = "Paid or COD order is present in TC but missing from OMS Report."
-                final_remarks = "Not Pushed to OMS"
-                is_disc = True
+        tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
+        tc_failed = ("failed" in tc_stat_norm or "failed" in tc_item_stat_norm)
+        oms_returned = ("return" in oms_stat.lower() or "returned" in oms_stat.lower() or "return" in oms_line_stat.lower() or "returned" in oms_line_stat.lower())
+
+        if tc_return:
+            val_result = "Returned (Ignored)"
+            details = f"TC status is '{tc_stat or tc_item_stat}', OMS status is '{oms_stat}' (Return requested/accepted is not pushed to OMS - Ignored)."
+            final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Returned (Ignored)"
+            is_disc = False
+        elif tc_failed and oms_returned:
+            val_result = "Delivery Failed (Returned)"
+            details = f"TC status is Delivery Failed, OMS status is Returned (Delivery Failed orders returned to warehouse - Ignored)."
+            final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Delivery Failed (Returned)"
+            is_disc = False
+        elif is_active_in_tc and not oms_stat:
+            val_result = "Not Pushed to OMS"
+            details = "Paid or COD order is present in TC but missing from OMS Report."
+            final_remarks = "Not Pushed to OMS"
+            is_disc = True
         elif not oms_stat:
             tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
-            tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
-            if tc_cancelled or tc_return:
+            if tc_cancelled:
                 val_result = "Returned/Cancelled (Ignored)"
                 details = f"TC status is '{tc_stat or tc_item_stat}' and missing from OMS."
                 final_remarks = "Returned/Cancelled (Ignored)"
@@ -1431,17 +1455,10 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 final_remarks = "Not in OMS"
                 is_disc = True
         elif oms_stat:
-            tc_return = ("return" in tc_stat_norm or "return" in tc_item_stat_norm)
             tc_cancelled = ("cancel" in tc_stat_norm or "cancel" in tc_item_stat_norm)
             oms_cancelled = ("cancel" in oms_stat.lower() or "void" in oms_stat.lower())
             
-            if tc_return:
-                # Return Requested / Return Accepted in TC is NOT a status mismatch vs OMS
-                val_result = "Returned (Ignored)"
-                details = f"TC status is '{tc_stat or tc_item_stat}', OMS status is '{oms_stat}' (Return requested/accepted is not pushed to OMS - Ignored)."
-                final_remarks = f"Successfully Pushed to OMS ({oms_stat})"
-                is_disc = False
-            elif tc_cancelled and not oms_cancelled:
+            if tc_cancelled and not oms_cancelled:
                 val_result = "Cancelled Status Mismatch"
                 details = f"Order is Cancelled in TC, but OMS shows status '{oms_stat}'."
                 final_remarks = "Cancelled Status Mismatch"
@@ -1452,7 +1469,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 final_remarks = "Cancelled Status Mismatch"
                 is_disc = True
             else:
-                oms_packed = ("packed" in oms_stat.lower() or "pack" in oms_stat.lower())
+                oms_packed = ("packed" in oms_stat.lower() or "pack" in oms_stat.lower() or "packed" in oms_line_stat.lower())
                 tc_new = ("new" in tc_stat_norm or "new" in tc_item_stat_norm)
                 if oms_packed and tc_new:
                     val_result = "OMS Packed but TC New"
@@ -1460,7 +1477,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                     final_remarks = "OMS Packed but TC New"
                     is_disc = True
                 
-                oms_shipped = ("shipped" in oms_stat.lower() or "ship" in oms_stat.lower() or "sent" in oms_stat.lower())
+                oms_shipped = ("shipped" in oms_stat.lower() or "ship" in oms_stat.lower() or "sent" in oms_stat.lower() or "shipped" in oms_line_stat.lower())
                 tc_ready_to_ship = ("ready" in tc_stat_norm or "ready" in tc_item_stat_norm or "to_ship" in tc_stat_norm or tc_new)
                 if oms_shipped and tc_ready_to_ship:
                     val_result = "OMS Shipped but TC Status Invalid"
@@ -1469,14 +1486,16 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                     is_disc = True
 
                 # Rule 4: TC Delivered but OMS not Delivered
-                if "delivered" in tc_stat_norm and "delivered" not in oms_stat.lower():
+                tc_is_delivered = ("delivered" in tc_stat_norm or "delivered" in tc_item_stat_norm)
+                oms_is_delivered = ("delivered" in oms_stat.lower() or "delivered" in oms_line_stat.lower())
+                if tc_is_delivered and not oms_is_delivered:
                     val_result = "TC Delivered but OMS not Delivered"
                     details = f"TC status is Delivered, but OMS status is '{oms_stat}'."
                     final_remarks = "TC Delivered but OMS not Delivered"
                     is_disc = True
 
                 # Rule 6: TC Delivery Failed but OMS not Returned
-                if "failed" in tc_stat_norm and not ("returned" in oms_stat.lower() or "return" in oms_stat.lower()):
+                if tc_failed and not oms_returned:
                     val_result = "TC Delivery Failed but OMS not Returned"
                     details = f"TC status is Delivery Failed, but OMS status is '{oms_stat}'."
                     final_remarks = "TC Delivery Failed but OMS not Returned"
@@ -1494,6 +1513,7 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             "SLA": sla_status_str,
             "sla_status": sla_status_str,
             "OMS Order Status": oms_stat if oms_stat else "Not in OMS",
+            "OMS Line Status": oms_line_stat,
             "Validation Result": val_result,
             "Details": details,
             "Final Remarks": final_remarks,
