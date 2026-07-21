@@ -649,7 +649,11 @@ def run_gsheet_oms_validation(df_pending, df_oms):
                         })
 
                     # Rule 5: TC/GSheet is Returned and OMS is not Returned
-                    if "returned" in pend_norm and not ("returned" in oms_norm or "return" in oms_norm):
+                    tc_is_return = ("returned" in pend_norm or "return" in pend_norm)
+                    oms_is_delivered = ("delivered" in oms_norm)
+                    if tc_is_return and oms_is_delivered:
+                        pass # Ignored per rule: Returned Requested/Accepted vs OMS Delivered is not a status mismatch
+                    elif tc_is_return and not ("returned" in oms_norm or "return" in oms_norm):
                         discrepancies.append({
                             "Order ID": order_id_str,
                             "Nickname": store_val,
