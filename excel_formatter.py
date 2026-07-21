@@ -340,12 +340,19 @@ def generate_fast_excel_bytes(sheet_dict):
                 'align': 'center',
                 'valign': 'vcenter'
             })
-            # Applied at the column level (not per-cell) so large files stay fast.
-            data_fmt = workbook.add_format({
-                'border': 1,
+            # Center alignment applied column-wide - harmless on blank cells
+            # (no visible effect without a border or content), so this is
+            # safe/fast to set via set_column.
+            align_fmt = workbook.add_format({
                 'align': 'center',
                 'valign': 'vcenter'
             })
+            # Border-only format. NOTE: Excel's conditional-formatting (dxf)
+            # spec does not support alignment, only border/font/fill/number
+            # format - so border must be applied separately from alignment
+            # via conditional_format if we want it scoped to just the data
+            # rows instead of the entire column.
+            border_fmt = workbook.add_format({'border': 1})
             
             for sheet_name, df in sheet_dict.items():
                 if df is None:
@@ -357,10 +364,7 @@ def generate_fast_excel_bytes(sheet_dict):
                 for col_num, value in enumerate(df.columns):
                     worksheet.write(0, col_num, value, header_fmt)
                     
-                # Autofit column widths using vectorized length max, and apply
-                # the bordered/centered data format to the whole column in one
-                # call (set_column format applies to every cell in that column
-                # that doesn't already have an explicit format).
+                # Autofit column widths + apply center alignment column-wide
                 for col_idx, col_name in enumerate(df.columns):
                     max_len = 0
                     if not df.empty:
@@ -369,7 +373,20 @@ def generate_fast_excel_bytes(sheet_dict):
                             max_len = int(val)
                     header_len = len(str(col_name))
                     width = max(max(max_len, header_len) + 3, 12)
-                    worksheet.set_column(col_idx, col_idx, width, data_fmt)
+                    worksheet.set_column(col_idx, col_idx, width, align_fmt)
+
+                # Apply border ONLY to the actual data rows (not the whole
+                # column down to row 1,048,576) via conditional_format, which
+                # lets us scope the border to exactly rows 1..len(df) in one
+                # fast call per sheet instead of looping over every cell.
+                if not df.empty:
+                    last_row = len(df)  # 0-indexed: row 1 through last_row
+                    last_col = len(df.columns) - 1
+                    worksheet.conditional_format(1, 0, last_row, last_col, {
+                        'type': 'formula',
+                        'criteria': '=TRUE()',
+                        'format': border_fmt
+                    })
         return excel_buffer.getvalue()
     except Exception:
         # Fallback to openpyxl with fast formatting if xlsxwriter is missing
