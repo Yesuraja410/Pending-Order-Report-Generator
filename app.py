@@ -40,8 +40,11 @@ with st.sidebar:
     st.markdown("## Configuration")
     st.markdown("Upload the daily reports below:")
     
-    gsheet_url = st.text_input("1. Pending Order Report (Google Sheet Link)", placeholder="https://docs.google.com/spreadsheets/d/...")
-    order_pending = gsheet_url if gsheet_url.strip() else None
+    st.markdown("**1. Pending Order Report**")
+    pending_file_upload = st.file_uploader("Upload Excel/CSV File", type=["xlsx","xls","csv"], key="pending_file_upload")
+    gsheet_url = st.text_input("Or enter Google Sheet Link", placeholder="https://docs.google.com/spreadsheets/d/...")
+    
+    order_pending = pending_file_upload if pending_file_upload is not None else (gsheet_url.strip() if gsheet_url.strip() else None)
         
     order_tc = st.file_uploader("2. TC Order Report", type=["xlsx","xls","csv"], key="order_tc")
     marketplace_reports = st.file_uploader("3. Market Place Reports (Multiple Upload)", type=["xlsx","xls","csv"], accept_multiple_files=True, key="marketplace_reports")
@@ -63,10 +66,10 @@ has_tc = has_tc_uploaded or has_mp_uploaded
 is_valid_combo = False
 mode_desc = ""
 
-# 1. Mode 1: GSheet + OMS Report Alone (No TC/MP required)
+# 1. Mode 1: Pending Order Report + OMS Report Alone (No TC/MP required)
 if has_pending and has_oms and not has_tc_uploaded and not has_mp_uploaded:
     is_valid_combo = True
-    mode_desc = "GSheet + OMS Validation Mode"
+    mode_desc = "Pending Order Report + OMS Validation Mode"
 # 2. Mode 2: TC Order Report + Marketplace Reports alone
 elif has_tc_uploaded and has_mp_uploaded and not has_pending and not has_oms:
     is_valid_combo = True
@@ -74,22 +77,22 @@ elif has_tc_uploaded and has_mp_uploaded and not has_pending and not has_oms:
 # 3. Mode 3: TC Order Report + OMS (without Marketplace)
 elif has_tc_uploaded and has_oms and not has_mp_uploaded and not has_pending:
     is_valid_combo = True
-    mode_desc = "TC + OMS Validation Mode"
-# 4. Mode 4: TC Order Report + Marketplace + OMS (without GSheet)
+    mode_desc = "TC + OMS Order Status Reconciliation Mode"
+# 4. Mode 4: TC Order Report + Marketplace + OMS (without Pending Report)
 elif has_tc_uploaded and has_mp_uploaded and has_oms and not has_pending:
     is_valid_combo = True
     mode_desc = "TC + Marketplace + OMS Validation Mode"
-# 5. Mode 5: GSheet + TC + OMS (with optional Marketplace)
+# 5. Mode 5: Pending Order Report + TC + OMS (with optional Marketplace)
 elif has_pending and has_tc_uploaded and has_oms:
     is_valid_combo = True
-    mode_desc = "Full Validation Mode (GSheet + TC + OMS)"
+    mode_desc = "Full Validation Mode (Pending Report + TC + OMS)"
 
 if not is_valid_combo:
     st.info(
         "💡 **Please upload one of the following combinations to start validation:**\n\n"
-        "1. **GSheet + OMS Mode**: Upload GSheet Link (1) and OMS Report (4).\n"
+        "1. **Pending Report + OMS Mode**: Upload Pending Order Report (Excel/CSV or GSheet Link) (1) and OMS Report (4).\n"
         "2. **TC + Marketplace Mode**: Upload TC Order Report (2) and Market Place Reports (3).\n"
-        "3. **TC + OMS Mode**: Upload TC Order Report (2) or Market Place Reports (3), and OMS Report (4) (optionally add GSheet Link for Full SLA Enrichment)."
+        "3. **TC + OMS Status Reconciliation Mode**: Upload TC Order Report (2) and OMS Report (4)."
     )
 else:
     # Display active mode banner
@@ -301,30 +304,57 @@ else:
                     key="dl_missing_orders"
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
-            else:
+
+                st.markdown("### Detailed Results")
+                if enriched_df.empty:
+                    st.success("🎉 All Marketplace orders are reflected in the TC Order Report!")
+                else:
+                    st.warning(f"⚠️ Found {len(enriched_df)} orders missing from TC Order Report.")
+                    st.dataframe(enriched_df, use_container_width=True, hide_index=True)
+            elif mode == "tc_oms":
                 st.markdown('<div class="download-container">', unsafe_allow_html=True)
-                st.markdown('<h3 class="download-header">📥 Download Status Discrepancies Report (Styled)</h3>', unsafe_allow_html=True)
+                st.markdown('<h3 class="download-header">📥 Download Order Status Reconciliation Report (Styled)</h3>', unsafe_allow_html=True)
                 
                 excel_buffer = io.BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                    export_enriched_df.to_excel(writer, sheet_name="Complete Status Report", index=False)
                     disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+                    
+                    excel_formatter.format_data_sheet(writer.sheets["Complete Status Report"], export_enriched_df)
                     excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
                     
                 st.download_button(
-                    label="📥 Download Discrepancy Report",
+                    label="📥 Download TC-OMS Status Reconciliation Report",
                     data=excel_buffer.getvalue(),
-                    file_name=f"Status Discrepancies Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
+                    file_name=f"TC-OMS Status Reconciliation Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    key="dl_discrepancies"
+                    key="dl_tc_oms_reconcil"
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
+
+                st.markdown("### Detailed Results")
+                sub_tab1, sub_tab2 = st.tabs([
+                    "Complete Status Validation Report", 
+                    "Status Discrepancies"
+                ])
+                
+                with sub_tab1:
+                    st.markdown("#### Complete Status Validation Report (Sheet 1)")
+                    display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                    st.dataframe(display_enriched, use_container_width=True, hide_index=True)
+                    
+                with sub_tab2:
+                    st.markdown("#### Status Discrepancies & Mismatches (Sheet 2)")
+                    if disc_df.empty:
+                        st.success("🎉 No status discrepancies or mismatches found!")
+                    else:
+                        st.warning(f"⚠️ Found {len(disc_df)} status discrepancies/mismatches.")
+                        st.dataframe(disc_df, use_container_width=True, hide_index=True)
         
-        # Display layout of tables
-        st.markdown("### Detailed Results")
-        # Display layout of tables
-        st.markdown("### Detailed Results")
         if has_pending:
+            st.markdown("### Detailed Results")
             sub_tab1, sub_tab2, sub_tab3 = st.tabs([
                 "SLA Report", 
                 "Status Discrepancies", 
