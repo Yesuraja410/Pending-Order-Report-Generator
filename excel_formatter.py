@@ -135,7 +135,7 @@ def format_data_sheet(ws, df):
     """Applies basic styling, bold headers, thin borders, and center alignment to data cells."""
     ws.sheet_view.showGridLines = True
     
-    header_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+    header_fill = PatternFill(start_color="87CEEB", end_color="87CEEB", fill_type="solid")
     
     # Header Row formatting
     for col_idx in range(1, len(df.columns) + 1):
@@ -334,7 +334,14 @@ def generate_fast_excel_bytes(sheet_dict):
             workbook = writer.book
             header_fmt = workbook.add_format({
                 'bold': True,
-                'bg_color': '#F2F2F2',
+                'bg_color': '#87CEEB',  # Sky blue
+                'font_color': '#000000',
+                'border': 1,
+                'align': 'center',
+                'valign': 'vcenter'
+            })
+            # Applied at the column level (not per-cell) so large files stay fast.
+            data_fmt = workbook.add_format({
                 'border': 1,
                 'align': 'center',
                 'valign': 'vcenter'
@@ -346,11 +353,14 @@ def generate_fast_excel_bytes(sheet_dict):
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 worksheet = writer.sheets[sheet_name]
                 
-                # Format header row
+                # Format header row - sky blue, bold, centered, bordered
                 for col_num, value in enumerate(df.columns):
                     worksheet.write(0, col_num, value, header_fmt)
                     
-                # Autofit column widths using vectorized length max
+                # Autofit column widths using vectorized length max, and apply
+                # the bordered/centered data format to the whole column in one
+                # call (set_column format applies to every cell in that column
+                # that doesn't already have an explicit format).
                 for col_idx, col_name in enumerate(df.columns):
                     max_len = 0
                     if not df.empty:
@@ -359,7 +369,7 @@ def generate_fast_excel_bytes(sheet_dict):
                             max_len = int(val)
                     header_len = len(str(col_name))
                     width = max(max(max_len, header_len) + 3, 12)
-                    worksheet.set_column(col_idx, col_idx, width)
+                    worksheet.set_column(col_idx, col_idx, width, data_fmt)
         return excel_buffer.getvalue()
     except Exception:
         # Fallback to openpyxl with fast formatting if xlsxwriter is missing
