@@ -66,33 +66,34 @@ has_tc = has_tc_uploaded or has_mp_uploaded
 is_valid_combo = False
 mode_desc = ""
 
-# 1. Mode 1: Pending Order Report + OMS Report Alone (No TC/MP required)
+# 1. Mode 1: 1 & 4 Uploading Option -> Pending order creation (Pending Report + OMS)
 if has_pending and has_oms and not has_tc_uploaded and not has_mp_uploaded:
     is_valid_combo = True
-    mode_desc = "Pending Order Report + OMS Validation Mode"
-# 2. Mode 2: TC Order Report + Marketplace Reports alone
+    mode_desc = "1. Pending Order Creation (Pending Report + OMS)"
+# 2. Mode 2: 2 & 3 Uploading Option -> Market Place Order Check (TC + Marketplace)
 elif has_tc_uploaded and has_mp_uploaded and not has_pending and not has_oms:
     is_valid_combo = True
-    mode_desc = "TC + Marketplace Reconciliation Mode"
-# 3. Mode 3: TC Order Report + OMS (without Marketplace)
+    mode_desc = "2. Market Place Order Check (TC + Marketplace)"
+# 3. Mode 3: 2 & 4 Uploading Option -> Order Status Reconciliation (TC + OMS)
 elif has_tc_uploaded and has_oms and not has_mp_uploaded and not has_pending:
     is_valid_combo = True
-    mode_desc = "TC + OMS Order Status Reconciliation Mode"
-# 4. Mode 4: TC Order Report + Marketplace + OMS (without Pending Report)
+    mode_desc = "3. Order Status Reconciliation (TC + OMS)"
+# 4. Mode 4: 2, 3 & 4 Uploading Option -> Order Flow Check (TC + Marketplace + OMS)
 elif has_tc_uploaded and has_mp_uploaded and has_oms and not has_pending:
     is_valid_combo = True
-    mode_desc = "TC + Marketplace + OMS Validation Mode"
-# 5. Mode 5: Pending Order Report + TC + OMS (with optional Marketplace)
+    mode_desc = "4. Order Flow Check (TC + Marketplace + OMS)"
+# 5. Mode 5: Full Validation Mode (Pending Report + TC + OMS + Marketplace)
 elif has_pending and has_tc_uploaded and has_oms:
     is_valid_combo = True
-    mode_desc = "Full Validation Mode (Pending Report + TC + OMS)"
+    mode_desc = "Full Pending Order Validation (Pending Report + TC + OMS)"
 
 if not is_valid_combo:
     st.info(
         "💡 **Please upload one of the following combinations to start validation:**\n\n"
-        "1. **Pending Report + OMS Mode**: Upload Pending Order Report (Excel/CSV or GSheet Link) (1) and OMS Report (4).\n"
-        "2. **TC + Marketplace Mode**: Upload TC Order Report (2) and Market Place Reports (3).\n"
-        "3. **TC + OMS Status Reconciliation Mode**: Upload TC Order Report (2) and OMS Report (4)."
+        "1. **Option 1 & 4 (Pending Order Creation)**: Upload Pending Order Report (1) and OMS Report (4).\n"
+        "2. **Option 2 & 3 (Market Place Order Check)**: Upload TC Order Report (2) and Market Place Reports (3).\n"
+        "3. **Option 2 & 4 (Order Status Reconciliation)**: Upload TC Order Report (2) and OMS Report (4).\n"
+        "4. **Option 2, 3 & 4 (Order Flow Check)**: Upload TC Order Report (2), Market Place Reports (3), and OMS Report (4)."
     )
 else:
     # Display active mode banner
@@ -311,46 +312,90 @@ else:
                 else:
                     st.warning(f"⚠️ Found {len(enriched_df)} orders missing from TC Order Report.")
                     st.dataframe(enriched_df, use_container_width=True, hide_index=True)
-            elif mode == "tc_oms":
+
+            elif mode == "order_flow_check":
                 st.markdown('<div class="download-container">', unsafe_allow_html=True)
-                st.markdown('<h3 class="download-header">📥 Download Order Status Reconciliation Report (Styled)</h3>', unsafe_allow_html=True)
+                st.markdown('<h3 class="download-header">📥 Download Order Flow Check Report (Styled)</h3>', unsafe_allow_html=True)
                 
                 excel_buffer = io.BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                     export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
-                    export_enriched_df.to_excel(writer, sheet_name="Complete Status Report", index=False)
-                    disc_df.to_excel(writer, sheet_name="Status Discrepancies", index=False)
+                    export_enriched_df.to_excel(writer, sheet_name="Consolidated Report", index=False)
+                    disc_df.to_excel(writer, sheet_name="Missing & Mismatch Orders", index=False)
                     
-                    excel_formatter.format_data_sheet(writer.sheets["Complete Status Report"], export_enriched_df)
-                    excel_formatter.format_data_sheet(writer.sheets["Status Discrepancies"], disc_df)
+                    excel_formatter.format_data_sheet(writer.sheets["Consolidated Report"], export_enriched_df)
+                    excel_formatter.format_data_sheet(writer.sheets["Missing & Mismatch Orders"], disc_df)
                     
                 st.download_button(
-                    label="📥 Download TC-OMS Status Reconciliation Report",
+                    label="📥 Download Order Flow Check Report",
                     data=excel_buffer.getvalue(),
-                    file_name=f"TC-OMS Status Reconciliation Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
+                    file_name=f"Order Flow Check Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    key="dl_tc_oms_reconcil"
+                    key="dl_order_flow_check"
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 st.markdown("### Detailed Results")
                 sub_tab1, sub_tab2 = st.tabs([
-                    "Complete Status Validation Report", 
-                    "Status Discrepancies"
+                    "Consolidated Report", 
+                    "Missing & Mismatch Orders"
                 ])
                 
                 with sub_tab1:
-                    st.markdown("#### Complete Status Validation Report (Sheet 1)")
+                    st.markdown("#### Consolidated Report (Sheet 1)")
                     display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
                     st.dataframe(display_enriched, use_container_width=True, hide_index=True)
                     
                 with sub_tab2:
-                    st.markdown("#### Status Discrepancies & Mismatches (Sheet 2)")
+                    st.markdown("#### Missing & Mismatch Orders (Sheet 2)")
                     if disc_df.empty:
-                        st.success("🎉 No status discrepancies or mismatches found!")
+                        st.success("🎉 All Marketplace orders are reflected in TC and all TC orders match OMS!")
                     else:
-                        st.warning(f"⚠️ Found {len(disc_df)} status discrepancies/mismatches.")
+                        st.warning(f"⚠️ Found {len(disc_df)} missing or mismatch orders.")
+                        st.dataframe(disc_df, use_container_width=True, hide_index=True)
+
+            else:
+                # Mode 3: Order Status Reconciliation (TC + OMS)
+                st.markdown('<div class="download-container">', unsafe_allow_html=True)
+                st.markdown('<h3 class="download-header">📥 Download Status Reconciliation Report (Styled)</h3>', unsafe_allow_html=True)
+                
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    export_enriched_df = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                    export_enriched_df.to_excel(writer, sheet_name="Consolidated Report", index=False)
+                    disc_df.to_excel(writer, sheet_name="Status Mismatches", index=False)
+                    
+                    excel_formatter.format_data_sheet(writer.sheets["Consolidated Report"], export_enriched_df)
+                    excel_formatter.format_data_sheet(writer.sheets["Status Mismatches"], disc_df)
+                    
+                st.download_button(
+                    label="📥 Download Status Reconciliation Report",
+                    data=excel_buffer.getvalue(),
+                    file_name=f"Status reconciliation Report - {datetime.today().strftime('%d-%m-%Y')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_status_reconciliation"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                st.markdown("### Detailed Results")
+                sub_tab1, sub_tab2 = st.tabs([
+                    "Consolidated Report", 
+                    "Status Mismatches"
+                ])
+                
+                with sub_tab1:
+                    st.markdown("#### Consolidated Report (Sheet 1)")
+                    display_enriched = enriched_df.drop(columns=["Correct Order Number", "SLA Source"], errors="ignore")
+                    st.dataframe(display_enriched, use_container_width=True, hide_index=True)
+                    
+                with sub_tab2:
+                    st.markdown("#### Status Mismatches (Sheet 2)")
+                    if disc_df.empty:
+                        st.success("🎉 No status mismatches found!")
+                    else:
+                        st.warning(f"⚠️ Found {len(disc_df)} status mismatches.")
                         st.dataframe(disc_df, use_container_width=True, hide_index=True)
         
         if has_pending:
