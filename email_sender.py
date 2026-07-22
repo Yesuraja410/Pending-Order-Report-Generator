@@ -69,8 +69,15 @@ def _smtp_connect_and_login(smtp_config):
 def test_smtp_connection(host, port, user, password, use_tls=True):
     """Test connection to the SMTP server."""
     try:
-        if not host or not user or not password:
-            return False, "SMTP configuration details are incomplete."
+        missing = []
+        if not str(host or "").strip():
+            missing.append("SMTP Server Host")
+        if not str(user or "").strip():
+            missing.append("SMTP Username")
+        if not str(password or "").strip():
+            missing.append("SMTP Password")
+        if missing:
+            return False, f"SMTP configuration details are incomplete. Missing: {', '.join(missing)}."
         cfg = {"host": host, "port": port, "user": user, "password": password, "use_tls": use_tls}
         server = _smtp_connect_and_login(cfg)
         server.quit()
