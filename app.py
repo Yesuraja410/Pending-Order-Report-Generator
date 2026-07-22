@@ -35,6 +35,55 @@ except Exception:
 st.title("Pending Order SLA Enrichment & OMS Status Validation")
 st.write("Upload the daily SLA Report (GSheet Link), Marketplace Order Reports (TC Reports), and OMS Report (Sales Order file) in the sidebar to run validations and email reports directly to the sellers.")
 
+# == SMTP Email Configuration (always available, independent of validation) ===
+st.markdown("### 📧 SMTP Email Configuration")
+try:
+    secrets_smtp = st.secrets.get("smtp", {}) if st.secrets else {}
+except Exception:
+    secrets_smtp = {}
+with st.expander("Configure SMTP Email Settings", expanded=False):
+    c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
+    c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
+    c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
+    c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
+    c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
+    c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
+    
+    if st.button("Test Connection"):
+        is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
+        if is_ok:
+            st.success(msg)
+            try:
+                with open("config.json", "r") as f:
+                    cfg_data = json.load(f)
+            except Exception:
+                cfg_data = {}
+            cfg_data["smtp_config"] = {
+                "host": c_host,
+                "port": int(c_port) if c_port.isdigit() else 587,
+                "user": c_user,
+                "password": c_pass,
+                "sender_email": c_sender,
+                "use_tls": c_tls
+            }
+            try:
+                with open("config.json", "w") as f:
+                    json.dump(cfg_data, f, indent=4)
+                st.info("Saved SMTP configuration to config.json!")
+            except Exception as save_err:
+                st.warning(f"Could not save config.json: {save_err}")
+        else:
+            st.error(msg)
+
+smtp_config = {
+    "host": c_host,
+    "port": c_port,
+    "user": c_user,
+    "password": c_pass,
+    "sender_email": c_sender,
+    "use_tls": c_tls
+}
+
 # == Sidebar ==================================================================-
 with st.sidebar:
     st.markdown("## Configuration")
@@ -321,55 +370,6 @@ else:
                     st.dataframe(disc_df, use_container_width=True, hide_index=True)
                     
             with sub_tab3:
-                st.markdown("#### SMTP Email Configuration")
-                try:
-                    secrets_smtp = st.secrets.get("smtp", {}) if st.secrets else {}
-                except Exception:
-                    secrets_smtp = {}
-                with st.expander("Configure SMTP Email Settings"):
-                    c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
-                    c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
-                    c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
-                    c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
-                    c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
-                    c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
-                    
-                    if st.button("Test Connection"):
-                        is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
-                        if is_ok:
-                            st.success(msg)
-                            try:
-                                with open("config.json", "r") as f:
-                                    cfg_data = json.load(f)
-                            except Exception:
-                                cfg_data = {}
-                            cfg_data["smtp_config"] = {
-                                "host": c_host,
-                                "port": int(c_port) if c_port.isdigit() else 587,
-                                "user": c_user,
-                                "password": c_pass,
-                                "sender_email": c_sender,
-                                "use_tls": c_tls
-                            }
-                            try:
-                                with open("config.json", "w") as f:
-                                    json.dump(cfg_data, f, indent=4)
-                                st.info("Saved SMTP configuration to config.json!")
-                            except Exception as save_err:
-                                st.warning(f"Could not save config.json: {save_err}")
-                        else:
-                            st.error(msg)
-                            
-                smtp_config = {
-                    "host": c_host,
-                    "port": c_port,
-                    "user": c_user,
-                    "password": c_pass,
-                    "sender_email": c_sender,
-                    "use_tls": c_tls
-                }
-                
-                st.markdown("---")
                 st.markdown("#### Country Pivot Summary & Email sharing")
 
                 # Hardcoded default recipients per country. Currently the same
@@ -560,6 +560,3 @@ else:
                 else:
                     st.warning(f"⚠️ Found {len(export_disc_df)} status mismatches.")
                     st.dataframe(export_disc_df, use_container_width=True, hide_index=True)
-        
-
-
