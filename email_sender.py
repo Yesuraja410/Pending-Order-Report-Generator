@@ -251,9 +251,157 @@ def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_d
     except Exception as e:
         return False, f"Failed to send email: {str(e)}"
 
-def send_country_report_email(smtp_config, country, to_email, cc_email, excel_bytes, ref_date_str, urgent_orders_df=None):
+def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy):
     """
-    Send the country-specific Excel report to the seller via SMTP.
+    Builds an inline-styled HTML block (pivot table + colored Order Summary
+    box side-by-side) for the country report email body, styled to match
+    the internal "Pending Orders - {country}" dashboard view:
+      - Date columns colored red/orange/green (breached/handover-today/
+        within-SLA) relative to the report's reference date.
+      - Rows for orders not reflected in OMS are highlighted yellow.
+      - A right-hand "Order Summary" box mirrors the 5 key metrics.
+    Falls back to a simple "no data" message if either dataframe is empty.
+    """
+    import pandas as pd
+    from datetime import datetime
+
+    if pivot_df is None or pivot_df.empty:
+        return "<p><em>No pending order data available for this country.</em></p>"
+
+    try:
+        today_dt = datetime.strptime(ref_date_dmy, "%d-%m-%Y") if ref_date_dmy else datetime.today()
+    except Exception:
+        today_dt = datetime.today()
+
+    cols = list(pivot_df.columns)
+    marketplace_col = cols[0]
+    status_col = cols[1] if len(cols) > 1 else cols[0]
+    date_cols = [c for c in cols[2:] if c != "Grand Total"]
+    has_grand_total = "Grand Total" in cols
+
+    def _cell_color(col_name, is_not_reflected):
+        if is_not_reflected:
+            return "#FDD835"  # yellow
+        try:
+            d = datetime.strptime(str(col_name), "%d-%m-%Y")
+        except Exception:
+            return None
+        if d.date() < today_dt.date():
+            return "#E53935"  # red - breached
+        elif d.date() == today_dt.date():
+            return "#FB8C00"  # orange - handover today
+        else:
+            return "#7CB342"  # green - within SLA
+
+    # Pre-compute rowspans so repeated Marketplace values are visually merged
+    marketplace_counts = pivot_df[marketplace_col].astype(str).value_counts()
+    printed_marketplace = set()
+
+    body_rows = []
+    for _, row in pivot_df.iterrows():
+        mp_val = str(row[marketplace_col])
+        status_val = str(row[status_col]) if status_col in row else ""
+        is_grand_total_row = (mp_val.strip() == "Grand Total")
+        is_not_reflected = status_val.strip().lower() in ("not in oms", "not reflected in oms")
+        display_status = "Not Reflected in OMS" if is_not_reflected else status_val
+
+        row_html = "<tr>"
+        if is_grand_total_row:
+            row_html += '<td colspan="2" style="border:1px solid #ddd;padding:6px 10px;font-weight:700;background:#eeeeee;">Grand Total</td>'
+        else:
+            if mp_val not in printed_marketplace:
+                rowspan = int(marketplace_counts.get(mp_val, 1))
+                row_html += f'<td rowspan="{rowspan}" style="border:1px solid #ddd;padding:6px 10px;font-weight:600;background:#fafafa;vertical-align:middle;">{mp_val}</td>'
+                printed_marketplace.add(mp_val)
+            row_html += f'<td style="border:1px solid #ddd;padding:6px 10px;{"background:#FDD835;font-weight:600;" if is_not_reflected else ""}">{display_status}</td>'
+
+        for dc in date_cols:
+            val = row.get(dc, 0)
+            try:
+                val_int = int(val) if pd.notna(val) else 0
+            except Exception:
+                val_int = 0
+            val_disp = "" if val_int == 0 else str(val_int)
+            style = "border:1px solid #ddd;padding:6px 10px;text-align:center;"
+            if is_grand_total_row:
+                style += "font-weight:700;background:#eeeeee;"
+            elif val_disp:
+                bg = _cell_color(dc, is_not_reflected)
+                if bg:
+                    style += f"background:{bg};color:#ffffff;font-weight:600;"
+            row_html += f'<td style="{style}">{val_disp}</td>'
+
+        if has_grand_total:
+            gt_val = row.get("Grand Total", 0)
+            try:
+                gt_disp = int(gt_val) if pd.notna(gt_val) else 0
+            except Exception:
+                gt_disp = 0
+            row_html += f'<td style="border:1px solid #ddd;padding:6px 10px;text-align:center;font-weight:700;background:#f5f5f5;">{gt_disp}</td>'
+        row_html += "</tr>"
+        body_rows.append(row_html)
+
+    header_html = (
+        '<tr>'
+        '<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;text-align:left;">Marketplace</th>'
+        '<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;text-align:left;">OMS Status</th>'
+    )
+    for dc in date_cols:
+        header_html += f'<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;">{dc}</th>'
+    if has_grand_total:
+        header_html += '<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;">Grand Total</th>'
+    header_html += '</tr>'
+
+    pivot_table_html = f"""
+    <table style="border-collapse:collapse;width:100%;font-size:13px;">
+        <tr><td colspan="{2 + len(date_cols) + (1 if has_grand_total else 0)}" style="background:#1a2333;color:#ffffff;padding:10px 12px;font-size:16px;font-weight:700;">📦 Pending Orders - {country}</td></tr>
+        {header_html}
+        {''.join(body_rows)}
+    </table>
+    """
+
+    # -- Order Summary box (right side) --
+    metrics_dict = summary_df.set_index("Metric")["Count"].to_dict() if summary_df is not None and not summary_df.empty else {}
+    summary_rows = [
+        ("Breached", metrics_dict.get("Overdue (SLA breached)", 0), "#E53935"),
+        ("Handover Today", metrics_dict.get("Handover today (Today SLA)", 0), "#FB8C00"),
+        ("Order Status at NEW", metrics_dict.get("Order Status at New", 0), "#1E88E5"),
+        ("Within SLA", metrics_dict.get("Within SLA (Future)", 0), "#7CB342"),
+        ("Not Reflected in OMS", metrics_dict.get("Not reflecting in OM", 0), "#FDD835"),
+    ]
+    summary_rows_html = ""
+    for label, count, color in summary_rows:
+        text_color = "#333333" if color == "#FDD835" else "#ffffff"
+        summary_rows_html += f"""
+        <tr>
+            <td style="padding:8px 12px;border-bottom:1px solid #eeeeee;background:{color};color:{text_color};font-weight:600;">{label}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eeeeee;text-align:right;font-weight:700;">{count}</td>
+        </tr>
+        """
+    summary_box_html = f"""
+    <table style="border-collapse:collapse;width:100%;font-size:13px;">
+        <tr><th colspan="2" style="background:#1a2333;color:#ffffff;padding:10px 12px;text-align:left;font-size:16px;">📊 Order Summary</th></tr>
+        {summary_rows_html}
+    </table>
+    """
+
+    combined_html = f"""
+    <table style="width:100%;border-collapse:collapse;margin-top:15px;margin-bottom:15px;">
+        <tr>
+            <td style="vertical-align:top;padding-right:15px;">{pivot_table_html}</td>
+            <td style="vertical-align:top;width:280px;">{summary_box_html}</td>
+        </tr>
+    </table>
+    """
+    return combined_html
+
+
+def send_country_report_email(smtp_config, country, to_email, cc_email, excel_bytes, ref_date_str, pivot_df=None, summary_df=None, urgent_orders_df=None):
+    """
+    Send the country-specific Excel report to Ops/Seller via SMTP.
+    Body includes the Pending Orders pivot table + Order Summary box (built
+    from pivot_df/summary_df). `urgent_orders_df` is accepted for backward
+    compatibility but no longer used for the body content.
     """
     import smtplib
     from datetime import datetime
@@ -269,48 +417,16 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     user = smtp_config.get("user")
     password = smtp_config.get("password")
     use_tls = smtp_config.get("use_tls", True)
+    # "From" is always the SMTP login/sender email - never a separately
+    # entered address - per business requirement.
     sender_email = smtp_config.get("sender_email", user)
 
-    # Build subject and attachment filename
     date_suffix = ref_date_str if ref_date_str else datetime.today().strftime('%d-%m-%Y')
-    subject = f"PUMA {country} - Pending Order & SLA Report ({date_suffix})"
+    subject = f"PUMA - {country} Pending order Report on {date_suffix}"
     filename = f"Pending_order_report_-_PUMA_{country}_{date_suffix}.xlsx"
 
-    # Build urgent orders table preview HTML
-    table_html = ""
-    if urgent_orders_df is not None and not urgent_orders_df.empty:
-        # Find column matches
-        id_col = next((c for c in urgent_orders_df.columns if "order" in c.lower() or "id" in c.lower()), urgent_orders_df.columns[0])
-        store_col = next((c for c in urgent_orders_df.columns if "store" in c.lower() or "seller" in c.lower() or "nickname" in c.lower()), "")
-        sla_col = next((c for c in urgent_orders_df.columns if "sla" in c.lower() or "date" in c.lower() or "deadline" in c.lower()), "")
-        oms_col = next((c for c in urgent_orders_df.columns if "oms" in c.lower() or "status" in c.lower()), "")
-        rem_col = next((c for c in urgent_orders_df.columns if "remark" in c.lower() or "final" in c.lower()), "")
-        
-        cols_to_preview = [id_col]
-        if store_col: cols_to_preview.append(store_col)
-        if sla_col: cols_to_preview.append(sla_col)
-        if oms_col: cols_to_preview.append(oms_col)
-        if rem_col: cols_to_preview.append(rem_col)
-        
-        # Filter for Breached or Today first
-        if "sla_status" in urgent_orders_df.columns:
-            sub_df = urgent_orders_df[urgent_orders_df["sla_status"].astype(str).str.lower().isin(["breached", "today"])].copy()
-            if sub_df.empty:
-                sub_df = urgent_orders_df.head(10).copy()
-        else:
-            sub_df = urgent_orders_df.head(10).copy()
-            
-        preview_df = sub_df[cols_to_preview].copy()
-        col_names_map = {id_col: "Order ID"}
-        if store_col: col_names_map[store_col] = "Store"
-        if sla_col: col_names_map[sla_col] = "SLA Deadline"
-        if oms_col: col_names_map[oms_col] = "OMS Status"
-        if rem_col: col_names_map[rem_col] = "Remarks"
-        preview_df = preview_df.rename(columns=col_names_map)
-        
-        table_html = preview_df.to_html(classes="table", index=False, border=0)
+    pivot_summary_html = _build_country_pivot_email_html(country, pivot_df, summary_df, date_suffix)
 
-    # Build HTML email body matching user requirements
     email_html = f"""
     <html>
     <head>
@@ -323,7 +439,7 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
                 padding: 20px;
             }}
             .container {{
-                max-width: 750px;
+                max-width: 900px;
                 background-color: #ffffff;
                 border: 1px solid #e0e0e0;
                 border-radius: 8px;
@@ -331,34 +447,14 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
                 margin: 0 auto;
                 box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
             }}
-            .header {{
-                border-bottom: 2px solid #BA0C2F;
-                padding-bottom: 15px;
-                margin-bottom: 20px;
-            }}
-            .header h2 {{
-                color: #BA0C2F;
-                margin: 0;
-                font-size: 22px;
-            }}
-            .table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 15px;
-                margin-bottom: 20px;
-                font-size: 13px;
-            }}
-            .table th {{
-                background-color: #f2f2f2;
-                color: #444444;
-                font-weight: bold;
-                text-align: left;
-                padding: 10px;
-                border: 1px solid #dddddd;
-            }}
-            .table td {{
-                padding: 10px;
-                border: 1px solid #eeeeee;
+            .highlight-note {{
+                background-color: #1E88E5;
+                color: #ffffff;
+                font-weight: 600;
+                padding: 10px 14px;
+                border-radius: 4px;
+                display: inline-block;
+                margin-top: 10px;
             }}
             .footer {{
                 font-size: 12px;
@@ -371,20 +467,17 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     </head>
     <body>
         <div class="container">
-            <div class="header">
-                <h2>PUMA {country} - Daily Pending Order & SLA Report</h2>
-                <p style="margin: 5px 0 0 0; color: #666666;">Date: <strong>{date_suffix}</strong></p>
-            </div>
-            
             <p>Hi Ops Team,</p>
             <p>find the attached Pending Orders Report. Kindly ensure all orders are processed and shipped on time to avoid any cancellations.</p>
-            
             <p>Below are orders that require immediate attention:</p>
-            {table_html}
 
-            <p style="margin-top: 25px;">Thanks & Regards,<br>
+            {pivot_summary_html}
+
+            <p><span class="highlight-note">Please prioritize shipping to avoid cancellations.</span></p>
+
+            <p style="margin-top: 25px;">Thanks &amp; Regards,<br>
             <strong>Graas Team</strong></p>
-            
+
             <div class="footer">
                 This is an automated report. Please do not reply directly to this email.
             </div>
@@ -394,10 +487,9 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     """
 
     msg = MIMEMultipart()
-    msg["From"] = f"Operations Team <{sender_email}>"
+    msg["From"] = sender_email
     msg["To"] = to_email
     
-    # Add Cc if provided
     recipients = [email.strip() for email in to_email.split(",") if email.strip()]
     if cc_email:
         msg["Cc"] = cc_email
@@ -406,7 +498,6 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     msg["Subject"] = subject
     msg.attach(MIMEText(email_html, "html"))
 
-    # Attach Excel file
     attachment = MIMEApplication(excel_bytes, _subtype="xlsx")
     attachment.add_header("Content-Disposition", "attachment", filename=filename)
     msg.attach(attachment)
@@ -418,6 +509,7 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
         return True, f"Report email for PUMA {country} sent successfully!"
     except Exception as e:
         return False, f"Failed to send email: {str(e)}"
+
 
 def send_discrepancies_to_slack_email(smtp_config, discrepancies_df, ref_date_str):
     """
