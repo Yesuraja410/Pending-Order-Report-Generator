@@ -17,7 +17,10 @@ st.set_page_config(
 
 from styles import inject_css
 from order_processor import process_and_validate_orders
-from email_sender import test_smtp_connection, test_brevo_connection, send_seller_report_email
+from email_sender import (
+    test_smtp_connection, test_brevo_connection, send_seller_report_email,
+    build_google_auth_url, exchange_google_code_for_tokens, test_google_connection
+)
 import excel_formatter
 
 inject_css()
@@ -60,12 +63,14 @@ else:
         "Community Cloud across restarts/redeploys. See the note at the bottom of this section to make it permanent."
     )
 
-provider_options = ["Office 365 / SMTP", "Brevo (API - use if SMTP is blocked)"]
-default_provider_idx = 1 if smtp_defaults.get("provider") == "brevo" else 0
+provider_options = ["Office 365 / SMTP", "Brevo (API - use if SMTP is blocked)", "Google (Gmail API - Sign in with Google)"]
+default_provider_idx = {"smtp": 0, "brevo": 1, "google": 2}.get(smtp_defaults.get("provider"), 0)
 email_provider_choice = st.selectbox("Email Provider", provider_options, index=default_provider_idx, key="email_provider_select")
-provider = "brevo" if email_provider_choice.startswith("Brevo") else "smtp"
+provider = "brevo" if email_provider_choice.startswith("Brevo") else ("google" if email_provider_choice.startswith("Google") else "smtp")
 
 with st.expander("Configure Email Settings", expanded=False):
+    c_google_client_id, c_google_client_secret, c_google_refresh_token = "", "", ""
+
     if provider == "smtp":
         c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
         c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
@@ -101,7 +106,7 @@ with st.expander("Configure Email Settings", expanded=False):
                     st.warning(f"Could not save config.json: {save_err}")
             else:
                 st.error(msg)
-    else:
+    elif provider == "brevo":
         st.caption(
             "Sign up free at brevo.com, verify a sender email/domain, and paste your API key here. "
             "This bypasses Office 365 SMTP entirely - no MFA app passwords or tenant SMTP AUTH settings needed."
@@ -133,6 +138,84 @@ with st.expander("Configure Email Settings", expanded=False):
             else:
                 st.error(msg)
 
+    else:  # provider == "google"
+        st.caption(
+            "Requires a one-time Google Cloud setup: create a project at console.cloud.google.com, "
+            "enable the **Gmail API**, configure the OAuth consent screen, and create an OAuth Client ID "
+            "(type: **Web application**) with this app's exact URL added as an Authorized redirect URI."
+        )
+        c_google_client_id = st.text_input("Google Client ID", value=smtp_defaults.get("google_client_id", ""), key="g_client_id")
+        c_google_client_secret = st.text_input("Google Client Secret", type="password", value=smtp_defaults.get("google_client_secret", ""), key="g_client_secret")
+        g_redirect_uri = st.text_input(
+            "Redirect URI (must exactly match the one registered in Google Cloud Console)",
+            value=smtp_defaults.get("google_redirect_uri", ""),
+            key="g_redirect_uri",
+            help="This app's own public URL, e.g. https://your-app-name.streamlit.app"
+        )
+        c_sender = st.text_input("Sender Gmail Address", value=smtp_defaults.get("sender_email", ""), key="g_sender")
+        c_host, c_port, c_user, c_pass, c_tls, c_api_key = "", "", "", "", True, ""
+
+        # Pull any refresh token already captured this session, else fall back
+        # to whatever's in Secrets/config.json.
+        c_google_refresh_token = st.session_state.get("g_refresh_token", smtp_defaults.get("google_refresh_token", ""))
+
+        # -- Handle the redirect back from Google (contains ?code=...) --
+        query_code = st.query_params.get("code")
+        if query_code and c_google_client_id and c_google_client_secret and g_redirect_uri and not st.session_state.get("g_oauth_processed"):
+            ok, result = exchange_google_code_for_tokens(c_google_client_id, c_google_client_secret, g_redirect_uri, query_code)
+            st.session_state["g_oauth_processed"] = True
+            if ok:
+                new_refresh_token = result.get("refresh_token", "")
+                if new_refresh_token:
+                    st.session_state["g_refresh_token"] = new_refresh_token
+                    c_google_refresh_token = new_refresh_token
+                    st.success("✅ Signed in with Google! Refresh token captured below - save it to Secrets to make this permanent.")
+                else:
+                    st.warning(
+                        "Signed in, but Google didn't return a refresh token (it only issues one on the very "
+                        "first consent for an app). Revoke access at https://myaccount.google.com/permissions "
+                        "for this app, then click Sign in with Google again."
+                    )
+            else:
+                st.error(f"Google sign-in failed: {result}")
+            st.query_params.clear()
+
+        if c_google_refresh_token:
+            st.text_input("Refresh Token (auto-filled after sign-in)", value=c_google_refresh_token, key="g_refresh_token_display", disabled=True)
+        else:
+            st.info("Not signed in yet - fill in Client ID, Client Secret and Redirect URI above, then click Sign in with Google below.")
+
+        if c_google_client_id and g_redirect_uri:
+            st.link_button("🔐 Sign in with Google", build_google_auth_url(c_google_client_id, g_redirect_uri), use_container_width=True)
+        else:
+            st.caption("Enter Client ID and Redirect URI above to enable Sign-In.")
+
+        if st.button("Test Connection", key="test_google_btn"):
+            is_ok, msg = test_google_connection(c_google_client_id, c_google_client_secret, c_google_refresh_token)
+            if is_ok:
+                st.success(msg)
+                try:
+                    with open("config.json", "r") as f:
+                        cfg_data = json.load(f)
+                except Exception:
+                    cfg_data = {}
+                cfg_data["smtp_config"] = {
+                    "provider": "google",
+                    "google_client_id": c_google_client_id,
+                    "google_client_secret": c_google_client_secret,
+                    "google_refresh_token": c_google_refresh_token,
+                    "google_redirect_uri": g_redirect_uri,
+                    "sender_email": c_sender
+                }
+                try:
+                    with open("config.json", "w") as f:
+                        json.dump(cfg_data, f, indent=4)
+                    st.info("Saved Google configuration to config.json!")
+                except Exception as save_err:
+                    st.warning(f"Could not save config.json: {save_err}")
+            else:
+                st.error(msg)
+
 smtp_config = {
     "provider": provider,
     "host": c_host,
@@ -141,7 +224,10 @@ smtp_config = {
     "password": c_pass,
     "sender_email": c_sender,
     "use_tls": c_tls,
-    "api_key": c_api_key
+    "api_key": c_api_key,
+    "google_client_id": c_google_client_id,
+    "google_client_secret": c_google_client_secret,
+    "google_refresh_token": c_google_refresh_token
 }
 
 if not using_secrets:
@@ -169,6 +255,17 @@ if not using_secrets:
             'provider = "brevo"\n'
             'api_key = "your-brevo-api-key-here"\n'
             'sender_email = "yesuraja@graas.ai"\n',
+            language="toml"
+        )
+        st.caption("Or, if using Google (Gmail API) instead:")
+        st.code(
+            '[smtp]\n'
+            'provider = "google"\n'
+            'google_client_id = "xxxxx.apps.googleusercontent.com"\n'
+            'google_client_secret = "your-client-secret-here"\n'
+            'google_refresh_token = "the-refresh-token-shown-after-you-sign-in"\n'
+            'google_redirect_uri = "https://your-app-name.streamlit.app"\n'
+            'sender_email = "yourname@gmail.com"\n',
             language="toml"
         )
         st.caption(
