@@ -460,13 +460,19 @@ def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_d
 def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy):
     """
     Builds an inline-styled HTML block (pivot table + colored Order Summary
-    box side-by-side) for the country report email body, styled to match
-    the internal "Pending Orders - {country}" dashboard view:
-      - Date columns colored red/orange/green (breached/handover-today/
-        within-SLA) relative to the report's reference date.
-      - Rows for orders not reflected in OMS are highlighted yellow.
-      - A right-hand "Order Summary" box mirrors the 5 key metrics.
-    Falls back to a simple "no data" message if either dataframe is empty.
+    box side-by-side) for the country report email body - a direct mirror of
+    the internal dashboard's Excel "Summary" sheet:
+      - Column headers use the pivot's actual column names (e.g. "Channel",
+        "OMS Order Status") rather than relabeled text.
+      - Status text (e.g. "Not in OMS") is shown exactly as-is, never renamed.
+      - Date columns are colored red/orange/green (breached/handover-today/
+        within-SLA) relative to the reference date - uniformly for every row,
+        with no special-case override for any particular status.
+      - The right-hand summary box shows all 6 dashboard metrics with the
+        same colors as the dashboard (Overdue=red, Handover Today=orange,
+        Order status at NEW=dark red, Within SLA=green, Not reflected in
+        OMS=pale green, Unpaid Orders=grey).
+    Falls back to a simple "no data" message if the pivot is empty.
     """
     import pandas as pd
     from datetime import datetime
@@ -485,21 +491,22 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
     date_cols = [c for c in cols[2:] if c != "Grand Total"]
     has_grand_total = "Grand Total" in cols
 
-    def _cell_color(col_name, is_not_reflected):
-        if is_not_reflected:
-            return "#FDD835"  # yellow
+    def _cell_color(col_name):
+        # Uniform date-based coloring for every row - no per-status override,
+        # matching the dashboard exactly.
         try:
             d = datetime.strptime(str(col_name), "%d-%m-%Y")
         except Exception:
             return None
         if d.date() < today_dt.date():
-            return "#E53935"  # red - breached
+            return "#FF0000"  # red - overdue/breached
         elif d.date() == today_dt.date():
-            return "#FB8C00"  # orange - handover today
+            return "#FFA500"  # orange - handover today
         else:
-            return "#7CB342"  # green - within SLA
+            return "#92D050"  # green - within SLA
 
-    # Pre-compute rowspans so repeated Marketplace values are visually merged
+    # Pre-compute rowspans so repeated Channel values are visually merged,
+    # same as the dashboard's merged cells.
     marketplace_counts = pivot_df[marketplace_col].astype(str).value_counts()
     printed_marketplace = set()
 
@@ -508,18 +515,17 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
         mp_val = str(row[marketplace_col])
         status_val = str(row[status_col]) if status_col in row else ""
         is_grand_total_row = (mp_val.strip() == "Grand Total")
-        is_not_reflected = status_val.strip().lower() in ("not in oms", "not reflected in oms")
-        display_status = "Not Reflected in OMS" if is_not_reflected else status_val
 
         row_html = "<tr>"
         if is_grand_total_row:
-            row_html += '<td colspan="2" style="border:1px solid #ddd;padding:6px 10px;font-weight:700;background:#eeeeee;">Grand Total</td>'
+            row_html += '<td colspan="2" style="border:1px solid #bfbfbf;padding:6px 10px;font-weight:700;background:#f2f2f2;">Grand Total</td>'
         else:
             if mp_val not in printed_marketplace:
                 rowspan = int(marketplace_counts.get(mp_val, 1))
-                row_html += f'<td rowspan="{rowspan}" style="border:1px solid #ddd;padding:6px 10px;font-weight:600;background:#fafafa;vertical-align:middle;">{mp_val}</td>'
+                row_html += f'<td rowspan="{rowspan}" style="border:1px solid #bfbfbf;padding:6px 10px;font-weight:600;background:#ffffff;vertical-align:middle;">{mp_val}</td>'
                 printed_marketplace.add(mp_val)
-            row_html += f'<td style="border:1px solid #ddd;padding:6px 10px;{"background:#FDD835;font-weight:600;" if is_not_reflected else ""}">{display_status}</td>'
+            # Status text shown exactly as-is - "Not in OMS" stays "Not in OMS".
+            row_html += f'<td style="border:1px solid #bfbfbf;padding:6px 10px;background:#ffffff;">{status_val}</td>'
 
         for dc in date_cols:
             val = row.get(dc, 0)
@@ -528,13 +534,17 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
             except Exception:
                 val_int = 0
             val_disp = "" if val_int == 0 else str(val_int)
-            style = "border:1px solid #ddd;padding:6px 10px;text-align:center;"
+            style = "border:1px solid #bfbfbf;padding:6px 10px;text-align:center;"
             if is_grand_total_row:
-                style += "font-weight:700;background:#eeeeee;"
+                style += "font-weight:700;background:#f2f2f2;"
             elif val_disp:
-                bg = _cell_color(dc, is_not_reflected)
+                bg = _cell_color(dc)
                 if bg:
                     style += f"background:{bg};color:#ffffff;font-weight:600;"
+                else:
+                    style += "background:#ffffff;"
+            else:
+                style += "background:#ffffff;"
             row_html += f'<td style="{style}">{val_disp}</td>'
 
         if has_grand_total:
@@ -543,50 +553,49 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
                 gt_disp = int(gt_val) if pd.notna(gt_val) else 0
             except Exception:
                 gt_disp = 0
-            row_html += f'<td style="border:1px solid #ddd;padding:6px 10px;text-align:center;font-weight:700;background:#f5f5f5;">{gt_disp}</td>'
+            row_html += f'<td style="border:1px solid #bfbfbf;padding:6px 10px;text-align:center;font-weight:700;background:#f2f2f2;">{gt_disp}</td>'
         row_html += "</tr>"
         body_rows.append(row_html)
 
     header_html = (
         '<tr>'
-        '<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;text-align:left;">Marketplace</th>'
-        '<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;text-align:left;">OMS Status</th>'
+        f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;text-align:left;">{marketplace_col}</th>'
+        f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;text-align:left;">{status_col}</th>'
     )
     for dc in date_cols:
-        header_html += f'<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;">{dc}</th>'
+        header_html += f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;">{dc}</th>'
     if has_grand_total:
-        header_html += '<th style="border:1px solid #ddd;padding:8px 10px;background:#1a2333;color:#ffffff;">Grand Total</th>'
+        header_html += '<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;">Grand Total</th>'
     header_html += '</tr>'
 
     pivot_table_html = f"""
     <table style="border-collapse:collapse;width:100%;font-size:13px;">
-        <tr><td colspan="{2 + len(date_cols) + (1 if has_grand_total else 0)}" style="background:#1a2333;color:#ffffff;padding:10px 12px;font-size:16px;font-weight:700;">📦 Pending Orders - {country}</td></tr>
+        <tr><td colspan="{2 + len(date_cols) + (1 if has_grand_total else 0)}" style="background:#9E1B32;color:#ffffff;padding:10px 12px;font-size:16px;font-weight:700;text-align:center;">PUMA {country} - Pending Orders</td></tr>
         {header_html}
         {''.join(body_rows)}
     </table>
     """
 
-    # -- Order Summary box (right side) --
+    # -- Order Summary box (right side) - all 6 dashboard metrics, same colors --
     metrics_dict = summary_df.set_index("Metric")["Count"].to_dict() if summary_df is not None and not summary_df.empty else {}
     summary_rows = [
-        ("Breached", metrics_dict.get("Overdue (SLA breached)", 0), "#E53935"),
-        ("Handover Today", metrics_dict.get("Handover today (Today SLA)", 0), "#FB8C00"),
-        ("Order Status at NEW", metrics_dict.get("Order Status at New", 0), "#1E88E5"),
-        ("Within SLA", metrics_dict.get("Within SLA (Future)", 0), "#7CB342"),
-        ("Not Reflected in OMS", metrics_dict.get("Not reflecting in OM", 0), "#FDD835"),
+        ("Overdue", metrics_dict.get("Overdue (SLA breached)", 0), "#FF0000", "#ffffff"),
+        ("Handover Today", metrics_dict.get("Handover today (Today SLA)", 0), "#FFA500", "#ffffff"),
+        ("Order status at NEW", metrics_dict.get("Order Status at New", 0), "#C00000", "#ffffff"),
+        ("Within SLA", metrics_dict.get("Within SLA (Future)", 0), "#92D050", "#ffffff"),
+        ("Not reflected in OMS", metrics_dict.get("Not reflecting in OM", 0), "#E2EFDA", "#000000"),
+        ("Unpaid Orders", metrics_dict.get("Unpaid Orders", 0), "#D9D9D9", "#000000"),
     ]
     summary_rows_html = ""
-    for label, count, color in summary_rows:
-        text_color = "#333333" if color == "#FDD835" else "#ffffff"
+    for label, count, bg_color, text_color in summary_rows:
         summary_rows_html += f"""
         <tr>
-            <td style="padding:8px 12px;border-bottom:1px solid #eeeeee;background:{color};color:{text_color};font-weight:600;">{label}</td>
-            <td style="padding:8px 12px;border-bottom:1px solid #eeeeee;text-align:right;font-weight:700;">{count}</td>
+            <td style="padding:8px 12px;border:1px solid #bfbfbf;background:{bg_color};color:{text_color};font-weight:600;">{label}</td>
+            <td style="padding:8px 12px;border:1px solid #bfbfbf;background:#ffffff;text-align:center;font-weight:700;">{count}</td>
         </tr>
         """
     summary_box_html = f"""
     <table style="border-collapse:collapse;width:100%;font-size:13px;">
-        <tr><th colspan="2" style="background:#1a2333;color:#ffffff;padding:10px 12px;text-align:left;font-size:16px;">📊 Order Summary</th></tr>
         {summary_rows_html}
     </table>
     """
@@ -631,18 +640,12 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
             body {{
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 color: #333333;
-                background-color: #f9f9f9;
+                background-color: #ffffff;
                 margin: 0;
                 padding: 20px;
             }}
-            .container {{
-                max-width: 900px;
-                background-color: #ffffff;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 30px;
-                margin: 0 auto;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            .content {{
+                max-width: 1000px;
             }}
             .highlight-note {{
                 background-color: #1E88E5;
@@ -663,7 +666,7 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
         </style>
     </head>
     <body>
-        <div class="container">
+        <div class="content">
             <p>Hi Ops Team,</p>
             <p>find the attached Pending Orders Report. Kindly ensure all orders are processed and shipped on time to avoid any cancellations.</p>
             <p>Below are orders that require immediate attention:</p>
