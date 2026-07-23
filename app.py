@@ -17,72 +17,164 @@ st.set_page_config(
 
 from styles import inject_css
 from order_processor import process_and_validate_orders
-from email_sender import test_smtp_connection, send_seller_report_email
+from email_sender import test_smtp_connection, test_brevo_connection, send_seller_report_email
 import excel_formatter
 
 inject_css()
 
-# Load default SMTP config from config.json
-smtp_defaults = {}
+# Load SMTP/Brevo config from two possible sources:
+#  1. config.json - convenient for local testing, but on Streamlit Community
+#     Cloud this file is NOT reliably persistent: it resets whenever the app
+#     restarts/redeploys, since only files committed to the Git repo survive.
+#  2. Streamlit Secrets (st.secrets) - the actual persistent backend storage
+#     on Streamlit Cloud. Configured once via the app's "Settings > Secrets"
+#     page in the dashboard, and survives restarts/redeploys indefinitely.
+# Secrets take priority over config.json when both are present.
+local_config = {}
 try:
     with open("config.json", "r") as config_file:
         cfg = json.load(config_file)
-        smtp_defaults = cfg.get("smtp_config", {})
+        local_config = cfg.get("smtp_config", {})
 except Exception:
     pass
+
+try:
+    secrets_smtp = dict(st.secrets.get("smtp", {})) if st.secrets else {}
+except Exception:
+    secrets_smtp = {}
+
+smtp_defaults = {**local_config, **secrets_smtp}
+using_secrets = bool(secrets_smtp)
 
 # Custom title and introduction
 st.title("Pending Order SLA Enrichment & OMS Status Validation")
 st.write("Upload the daily SLA Report (GSheet Link), Marketplace Order Reports (TC Reports), and OMS Report (Sales Order file) in the sidebar to run validations and email reports directly to the sellers.")
 
-# == SMTP Email Configuration (always available, independent of validation) ===
-st.markdown("### 📧 SMTP Email Configuration")
-try:
-    secrets_smtp = st.secrets.get("smtp", {}) if st.secrets else {}
-except Exception:
-    secrets_smtp = {}
-with st.expander("Configure SMTP Email Settings", expanded=False):
-    c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
-    c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
-    c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
-    c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
-    c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
-    c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
-    
-    if st.button("Test Connection"):
-        is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
-        if is_ok:
-            st.success(msg)
-            try:
-                with open("config.json", "r") as f:
-                    cfg_data = json.load(f)
-            except Exception:
-                cfg_data = {}
-            cfg_data["smtp_config"] = {
-                "host": c_host,
-                "port": int(c_port) if c_port.isdigit() else 587,
-                "user": c_user,
-                "password": c_pass,
-                "sender_email": c_sender,
-                "use_tls": c_tls
-            }
-            try:
-                with open("config.json", "w") as f:
-                    json.dump(cfg_data, f, indent=4)
-                st.info("Saved SMTP configuration to config.json!")
-            except Exception as save_err:
-                st.warning(f"Could not save config.json: {save_err}")
-        else:
-            st.error(msg)
+# == Email Configuration (always available, independent of validation) =======
+st.markdown("### 📧 Email Configuration")
+if using_secrets:
+    st.caption("✅ Loaded from Streamlit Secrets (persists permanently - survives app restarts/redeploys).")
+else:
+    st.caption(
+        "⚠️ No Streamlit Secrets found - using config.json, which does **not** reliably persist on Streamlit "
+        "Community Cloud across restarts/redeploys. See the note at the bottom of this section to make it permanent."
+    )
+
+provider_options = ["Office 365 / SMTP", "Brevo (API - use if SMTP is blocked)"]
+default_provider_idx = 1 if smtp_defaults.get("provider") == "brevo" else 0
+email_provider_choice = st.selectbox("Email Provider", provider_options, index=default_provider_idx, key="email_provider_select")
+provider = "brevo" if email_provider_choice.startswith("Brevo") else "smtp"
+
+with st.expander("Configure Email Settings", expanded=False):
+    if provider == "smtp":
+        c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
+        c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
+        c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
+        c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
+        c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
+        c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
+        c_api_key = ""
+
+        if st.button("Test Connection"):
+            is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
+            if is_ok:
+                st.success(msg)
+                try:
+                    with open("config.json", "r") as f:
+                        cfg_data = json.load(f)
+                except Exception:
+                    cfg_data = {}
+                cfg_data["smtp_config"] = {
+                    "provider": "smtp",
+                    "host": c_host,
+                    "port": int(c_port) if c_port.isdigit() else 587,
+                    "user": c_user,
+                    "password": c_pass,
+                    "sender_email": c_sender,
+                    "use_tls": c_tls
+                }
+                try:
+                    with open("config.json", "w") as f:
+                        json.dump(cfg_data, f, indent=4)
+                    st.info("Saved SMTP configuration to config.json!")
+                except Exception as save_err:
+                    st.warning(f"Could not save config.json: {save_err}")
+            else:
+                st.error(msg)
+    else:
+        st.caption(
+            "Sign up free at brevo.com, verify a sender email/domain, and paste your API key here. "
+            "This bypasses Office 365 SMTP entirely - no MFA app passwords or tenant SMTP AUTH settings needed."
+        )
+        c_api_key = st.text_input("Brevo API Key", type="password", value=smtp_defaults.get("api_key", ""), key="brevo_api_key")
+        c_sender = st.text_input("Sender Email Address (must be a verified sender in Brevo)", value=smtp_defaults.get("sender_email", ""), key="brevo_sender")
+        c_host, c_port, c_user, c_pass, c_tls = "", "", "", "", True
+
+        if st.button("Test Connection", key="test_brevo_btn"):
+            is_ok, msg = test_brevo_connection(c_api_key)
+            if is_ok:
+                st.success(msg)
+                try:
+                    with open("config.json", "r") as f:
+                        cfg_data = json.load(f)
+                except Exception:
+                    cfg_data = {}
+                cfg_data["smtp_config"] = {
+                    "provider": "brevo",
+                    "api_key": c_api_key,
+                    "sender_email": c_sender
+                }
+                try:
+                    with open("config.json", "w") as f:
+                        json.dump(cfg_data, f, indent=4)
+                    st.info("Saved Brevo configuration to config.json!")
+                except Exception as save_err:
+                    st.warning(f"Could not save config.json: {save_err}")
+            else:
+                st.error(msg)
 
 smtp_config = {
+    "provider": provider,
     "host": c_host,
     "port": c_port,
     "user": c_user,
     "password": c_pass,
     "sender_email": c_sender,
-    "use_tls": c_tls
+    "use_tls": c_tls,
+    "api_key": c_api_key
 }
+
+if not using_secrets:
+    with st.expander("📌 Make this permanent (Streamlit Secrets setup)"):
+        st.markdown(
+            "Settings entered above and saved via **Test Connection** are written to `config.json`, "
+            "but on Streamlit Community Cloud that file resets whenever the app restarts or redeploys. "
+            "To make your credentials truly permanent, add them once via **Manage app → Settings → Secrets** "
+            "in the Streamlit Cloud dashboard, using this format:"
+        )
+        st.code(
+            '[smtp]\n'
+            'provider = "smtp"\n'
+            'host = "smtp.office365.com"\n'
+            'port = 587\n'
+            'user = "yesuraja@graas.ai"\n'
+            'password = "your-app-password-here"\n'
+            'sender_email = "yesuraja@graas.ai"\n'
+            'use_tls = true\n',
+            language="toml"
+        )
+        st.caption("Or, if using Brevo instead:")
+        st.code(
+            '[smtp]\n'
+            'provider = "brevo"\n'
+            'api_key = "your-brevo-api-key-here"\n'
+            'sender_email = "yesuraja@graas.ai"\n',
+            language="toml"
+        )
+        st.caption(
+            "Once saved there, the app will automatically pick it up on every restart - no more "
+            "re-entering credentials, and the message above will change to confirm it's loaded from Secrets."
+        )
 
 # == Sidebar ==================================================================-
 with st.sidebar:
