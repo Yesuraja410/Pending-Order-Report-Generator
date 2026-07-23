@@ -19,7 +19,8 @@ from styles import inject_css
 from order_processor import process_and_validate_orders
 from email_sender import (
     test_smtp_connection, send_seller_report_email,
-    send_discrepancies_to_slack_webhook, test_slack_bot_token, send_excel_to_slack_channel
+    send_discrepancies_to_slack_webhook, send_discrepancies_to_slack_email,
+    test_slack_bot_token, send_excel_to_slack_channel
 )
 import excel_formatter
 
@@ -231,21 +232,15 @@ with st.expander("Configure Slack", expanded=False):
 
 def _share_discrepancies_to_slack(df, ref_date_str):
     """
-    Shared helper used by every 'Share to Slack' button. Prefers uploading
-    the actual Excel file (needs Bot Token + Channel ID); falls back to a
-    text-only summary via Webhook if no Bot Token is configured.
+    Shared helper used by every 'Share to Slack' button. Uses the SMTP
+    email-to-Slack-channel method (posts as an email in the channel, with
+    the Excel file as a real attachment) - this is the confirmed-working
+    path since it reuses the already-working SMTP configuration, rather
+    than requiring a separate Slack Bot Token.
     """
-    if slack_bot_token and slack_channel_id:
-        excel_bytes = excel_formatter.generate_fast_excel_bytes({"Status Discrepancies": df})
-        filename = f"Status_Discrepancies_{ref_date_str or datetime.today().strftime('%d-%m-%Y')}.xlsx"
-        return send_excel_to_slack_channel(
-            slack_bot_token, slack_channel_id, excel_bytes, filename,
-            initial_comment=f"📋 Status Discrepancies Report ({ref_date_str or datetime.today().strftime('%d-%m-%Y')}) - {len(df)} total"
-        )
-    elif slack_webhook_url:
-        return send_discrepancies_to_slack_webhook(slack_webhook_url, df, ref_date_str)
-    else:
-        return False, "No Slack Bot Token/Channel or Webhook URL configured - set one up in the Slack Integration section above."
+    if not (smtp_config.get("host") and smtp_config.get("user") and smtp_config.get("password")):
+        return False, "SMTP is not fully configured - set it up in the Email Configuration section above first."
+    return send_discrepancies_to_slack_email(smtp_config, df, ref_date_str)
 
 
 # == Sidebar ==================================================================-
