@@ -3,6 +3,8 @@
 import smtplib
 import os
 import io
+import base64
+import requests
 import pandas as pd
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -84,6 +86,79 @@ def test_smtp_connection(host, port, user, password, use_tls=True):
         return True, "Successfully connected to SMTP server!"
     except Exception as e:
         return False, f"SMTP Connection failed: {str(e)}"
+
+
+def test_brevo_connection(api_key):
+    """
+    Verify a Brevo (formerly Sendinblue) API key by calling their account
+    endpoint. Used as an alternative to SMTP when Office 365 blocks
+    Authenticated SMTP / legacy auth.
+    """
+    try:
+        if not str(api_key or "").strip():
+            return False, "Brevo API Key is required."
+        resp = requests.get(
+            "https://api.brevo.com/v3/account",
+            headers={"api-key": api_key, "Accept": "application/json"},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            acct_email = data.get("email", "")
+            return True, f"Successfully connected to Brevo!{f' (Account: {acct_email})' if acct_email else ''}"
+        elif resp.status_code == 401:
+            return False, "Brevo connection failed: Invalid API key (401 Unauthorized)."
+        else:
+            return False, f"Brevo connection failed: {resp.status_code} - {resp.text[:200]}"
+    except Exception as e:
+        return False, f"Brevo connection failed: {str(e)}"
+
+
+def _send_via_brevo(api_key, sender_email, sender_name, to_email, cc_email, subject, html_body,
+                     attachment_bytes=None, attachment_filename=None):
+    """
+    Send an email through the Brevo transactional email API (HTTPS, API-key
+    based) instead of SMTP. sender_email must be a verified sender in the
+    Brevo account.
+    """
+    try:
+        if not str(api_key or "").strip():
+            return False, "Brevo API Key is required."
+        if not str(sender_email or "").strip():
+            return False, "Sender Email is required (must be a verified sender in Brevo)."
+
+        to_list = [{"email": e.strip()} for e in str(to_email or "").split(",") if e.strip()]
+        if not to_list:
+            return False, "Recipient 'To' email address is required."
+
+        payload = {
+            "sender": {"email": sender_email, "name": sender_name or "Graas Team"},
+            "to": to_list,
+            "subject": subject,
+            "htmlContent": html_body
+        }
+        cc_list = [{"email": e.strip()} for e in str(cc_email or "").split(",") if e.strip()]
+        if cc_list:
+            payload["cc"] = cc_list
+        if attachment_bytes is not None and attachment_filename:
+            payload["attachment"] = [{
+                "content": base64.b64encode(attachment_bytes).decode("utf-8"),
+                "name": attachment_filename
+            }]
+
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": api_key, "Content-Type": "application/json", "Accept": "application/json"},
+            json=payload,
+            timeout=30
+        )
+        if resp.status_code in (200, 201):
+            return True, "Email sent successfully via Brevo!"
+        else:
+            return False, f"Brevo send failed: {resp.status_code} - {resp.text[:300]}"
+    except Exception as e:
+        return False, f"Brevo send failed: {str(e)}"
+
 
 def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_df, discrepancies_df=None):
     """
@@ -405,12 +480,12 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
 
 def send_country_report_email(smtp_config, country, to_email, cc_email, excel_bytes, ref_date_str, pivot_df=None, summary_df=None, urgent_orders_df=None):
     """
-    Send the country-specific Excel report to Ops/Seller via SMTP.
+    Send the country-specific Excel report to Ops/Seller, via either SMTP or
+    the Brevo API depending on smtp_config["provider"] ("smtp" or "brevo").
     Body includes the Pending Orders pivot table + Order Summary box (built
     from pivot_df/summary_df). `urgent_orders_df` is accepted for backward
     compatibility but no longer used for the body content.
     """
-    import smtplib
     from datetime import datetime
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
@@ -418,15 +493,6 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
 
     if not to_email or "@" not in to_email:
         return False, "Recipient 'To' email address is required and must be valid."
-        
-    host = smtp_config.get("host")
-    port = int(smtp_config.get("port", 587))
-    user = smtp_config.get("user")
-    password = smtp_config.get("password")
-    use_tls = smtp_config.get("use_tls", True)
-    # "From" is always the SMTP login/sender email - never a separately
-    # entered address - per business requirement.
-    sender_email = smtp_config.get("sender_email", user)
 
     date_suffix = ref_date_str if ref_date_str else datetime.today().strftime('%d-%m-%Y')
     subject = f"PUMA - {country} Pending order Report on {date_suffix}"
@@ -493,10 +559,35 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
     </html>
     """
 
+    provider = smtp_config.get("provider", "smtp")
+
+    # -- Path 1: Brevo API (recommended when Office 365 SMTP AUTH is blocked) --
+    if provider == "brevo":
+        ok, msg = _send_via_brevo(
+            api_key=smtp_config.get("api_key", ""),
+            sender_email=smtp_config.get("sender_email", ""),
+            sender_name="Graas Team",
+            to_email=to_email,
+            cc_email=cc_email,
+            subject=subject,
+            html_body=email_html,
+            attachment_bytes=excel_bytes,
+            attachment_filename=filename
+        )
+        if ok:
+            return True, f"Report email for PUMA {country} sent successfully via Brevo!"
+        return False, msg
+
+    # -- Path 2: SMTP (Office 365 / other) --
+    user = smtp_config.get("user")
+    # "From" is always the SMTP login/sender email - never a separately
+    # entered address - per business requirement.
+    sender_email = smtp_config.get("sender_email", user)
+
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = to_email
-    
+
     recipients = [email.strip() for email in to_email.split(",") if email.strip()]
     if cc_email:
         msg["Cc"] = cc_email
