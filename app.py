@@ -19,7 +19,8 @@ from styles import inject_css
 from order_processor import process_and_validate_orders
 from email_sender import (
     test_smtp_connection, test_brevo_connection, send_seller_report_email,
-    build_google_auth_url, exchange_google_code_for_tokens, test_google_connection
+    build_google_auth_url, exchange_google_code_for_tokens, test_google_connection,
+    send_discrepancies_to_slack_webhook
 )
 import excel_formatter
 
@@ -272,6 +273,57 @@ if not using_secrets:
             "Once saved there, the app will automatically pick it up on every restart - no more "
             "re-entering credentials, and the message above will change to confirm it's loaded from Secrets."
         )
+
+# == Slack Integration (always available, independent of validation) ========
+st.markdown("### 💬 Slack Integration")
+try:
+    local_slack_cfg = {}
+    try:
+        with open("config.json", "r") as config_file:
+            cfg = json.load(config_file)
+            local_slack_cfg = cfg.get("slack_config", {})
+    except Exception:
+        pass
+    secrets_slack = dict(st.secrets.get("slack", {})) if st.secrets else {}
+except Exception:
+    secrets_slack = {}
+
+slack_defaults = {**local_slack_cfg, **secrets_slack}
+using_slack_secrets = bool(secrets_slack)
+
+if using_slack_secrets:
+    st.caption("✅ Slack Webhook loaded from Streamlit Secrets (persists permanently).")
+else:
+    st.caption("⚠️ No Slack Secrets found - using config.json (does not persist across restarts) or the field below.")
+
+with st.expander("Configure Slack Webhook", expanded=False):
+    st.caption(
+        "Paste an Incoming Webhook URL from your Slack app (Slack → App settings → Incoming Webhooks). "
+        "Treat this like a password - anyone with the URL can post into that channel."
+    )
+    slack_webhook_url = st.text_input(
+        "Slack Webhook URL",
+        type="password",
+        value=slack_defaults.get("webhook_url", ""),
+        key="slack_webhook_url_input"
+    )
+    if st.button("Save Webhook (this session / config.json)"):
+        try:
+            with open("config.json", "r") as f:
+                cfg_data = json.load(f)
+        except Exception:
+            cfg_data = {}
+        cfg_data["slack_config"] = {"webhook_url": slack_webhook_url}
+        try:
+            with open("config.json", "w") as f:
+                json.dump(cfg_data, f, indent=4)
+            st.success("Saved for this session. For a permanent setup, add it to Streamlit Secrets instead (see below).")
+        except Exception as save_err:
+            st.warning(f"Could not save config.json: {save_err}")
+
+    if not using_slack_secrets:
+        st.caption("To make this permanent, add to Streamlit Secrets (Manage app → Settings → Secrets):")
+        st.code('[slack]\nwebhook_url = "https://hooks.slack.com/services/XXX/XXX/XXXXXXXX"\n', language="toml")
 
 # == Sidebar ==================================================================-
 with st.sidebar:
@@ -557,7 +609,19 @@ else:
                 else:
                     st.warning(f"Found {len(disc_df)} discrepancies/warnings.")
                     st.dataframe(disc_df, use_container_width=True, hide_index=True)
-                    
+
+                st.markdown("---")
+                if st.button("💬 Share to Slack", key="slack_send_mode1"):
+                    if not slack_webhook_url:
+                        st.error("❌ No Slack Webhook URL configured - set it in the Slack Integration section above.")
+                    else:
+                        with st.spinner("Posting to Slack..."):
+                            ok, msg = send_discrepancies_to_slack_webhook(slack_webhook_url, disc_df, ref_date_dmy)
+                            if ok:
+                                st.success(f"✅ {msg}")
+                            else:
+                                st.error(f"❌ {msg}")
+
             with sub_tab3:
                 st.markdown("#### Country Pivot Summary & Email sharing")
 
@@ -706,6 +770,18 @@ else:
                     st.warning(f"⚠️ Found {len(export_disc_df)} missing or mismatch orders.")
                     st.dataframe(export_disc_df, use_container_width=True, hide_index=True)
 
+                st.markdown("---")
+                if st.button("💬 Share to Slack", key="slack_send_mode2"):
+                    if not slack_webhook_url:
+                        st.error("❌ No Slack Webhook URL configured - set it in the Slack Integration section above.")
+                    else:
+                        with st.spinner("Posting to Slack..."):
+                            ok, msg = send_discrepancies_to_slack_webhook(slack_webhook_url, export_disc_df, datetime.today().strftime('%d-%m-%Y'))
+                            if ok:
+                                st.success(f"✅ {msg}")
+                            else:
+                                st.error(f"❌ {msg}")
+
         else:
             # Mode 3: Order Status Reconciliation (File 2 + File 4: TC + OMS)
             st.markdown('<div class="download-container">', unsafe_allow_html=True)
@@ -749,3 +825,15 @@ else:
                 else:
                     st.warning(f"⚠️ Found {len(export_disc_df)} status mismatches.")
                     st.dataframe(export_disc_df, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+                if st.button("💬 Share to Slack", key="slack_send_mode3"):
+                    if not slack_webhook_url:
+                        st.error("❌ No Slack Webhook URL configured - set it in the Slack Integration section above.")
+                    else:
+                        with st.spinner("Posting to Slack..."):
+                            ok, msg = send_discrepancies_to_slack_webhook(slack_webhook_url, export_disc_df, datetime.today().strftime('%d-%m-%Y'))
+                            if ok:
+                                st.success(f"✅ {msg}")
+                            else:
+                                st.error(f"❌ {msg}")
