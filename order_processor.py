@@ -9,6 +9,12 @@ import urllib.error
 import json
 import os
 import requests
+
+# Collects non-fatal warnings from file loading (e.g. malformed CSV rows that
+# had to be skipped) so the app can surface them to the user instead of
+# silently dropping data or crashing the whole run. Cleared at the start of
+# each process_and_validate_orders() call.
+FILE_LOAD_WARNINGS = []
 from datetime import datetime
 
 def get_google_sheet_download_url(url):
@@ -258,6 +264,35 @@ def load_file_safely(file):
             try:
                 file.seek(0)
                 df = pd.read_csv(file, dtype=str)
+                if not df.empty:
+                    return df.dropna(how="all").reset_index(drop=True)
+            except Exception:
+                pass
+
+            # FIX: previously, if the standard read failed (e.g. a row has
+            # more fields than the header - typically an unescaped comma
+            # inside a text field like an address or product name), the
+            # fallback below just retried the exact same strict parsing and
+            # crashed the ENTIRE run, blocking every other file too. Instead,
+            # try again allowing malformed rows to be skipped (not silently -
+            # every skipped row is recorded in FILE_LOAD_WARNINGS so it can be
+            # surfaced to the user) rather than failing the whole file.
+            try:
+                file.seek(0)
+                skipped_lines = []
+
+                def _capture_bad_line(bad_line):
+                    skipped_lines.append(bad_line)
+                    return None  # tells pandas to drop this line and continue
+
+                df = pd.read_csv(file, dtype=str, engine="python", on_bad_lines=_capture_bad_line)
+                if skipped_lines:
+                    FILE_LOAD_WARNINGS.append(
+                        f"'{name}': skipped {len(skipped_lines)} malformed row(s) that had an "
+                        f"unexpected number of fields (likely an unescaped comma in a text field "
+                        f"like an address or product name). These rows were NOT included in the "
+                        f"report - please check the source file for orders that may be missing."
+                    )
                 if not df.empty:
                     return df.dropna(how="all").reset_index(drop=True)
             except Exception:
@@ -1745,6 +1780,8 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
     }
 
 def process_and_validate_orders(pending_file, tc_file, *args, **kwargs):
+    FILE_LOAD_WARNINGS.clear()
+
     # Resolve marketplace_file and oms_file based on positional args length
     marketplace_file = None
     oms_file = None
@@ -1820,15 +1857,21 @@ def process_and_validate_orders(pending_file, tc_file, *args, **kwargs):
 
     # New Mode: TC Report (+ Marketplace Report) + OMS Report (but no Pending/GSheet report)
     if has_tc and has_oms and not has_pending:
-        return run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms)
+        result = run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms)
+        result["file_load_warnings"] = list(FILE_LOAD_WARNINGS)
+        return result
 
     # Mode 2: TC Order Report + Marketplace Reports alone
     elif (has_tc or has_marketplace) and not has_pending and not has_oms:
-        return run_tc_marketplace_reconciliation(df_tc, df_marketplace)
+        result = run_tc_marketplace_reconciliation(df_tc, df_marketplace)
+        result["file_load_warnings"] = list(FILE_LOAD_WARNINGS)
+        return result
         
     # Mode 1: GSheet + OMS Report Alone
     elif has_pending and has_oms and not has_tc and not has_marketplace:
-        return run_gsheet_oms_validation(df_pending, df_oms, df_contacts)
+        result = run_gsheet_oms_validation(df_pending, df_oms, df_contacts)
+        result["file_load_warnings"] = list(FILE_LOAD_WARNINGS)
+        return result
         
     # Default Mode 3/4: standard validation with combined TC + Marketplace reports
     else:
@@ -1841,7 +1884,9 @@ def process_and_validate_orders(pending_file, tc_file, *args, **kwargs):
         if combined_tc_dfs:
             df_tc = pd.concat(combined_tc_dfs, ignore_index=True)
             
-        return run_standard_validation(df_pending, df_tc, df_oms, df_contacts)
+        result = run_standard_validation(df_pending, df_tc, df_oms, df_contacts)
+        result["file_load_warnings"] = list(FILE_LOAD_WARNINGS)
+        return result
 
 def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
 
@@ -2673,4 +2718,3 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         "tc_lookup": tc_lookup,
         "oms_lookup": oms_lookup
     }
-
