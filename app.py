@@ -353,35 +353,45 @@ else:
         # Display metrics
         st.markdown("### Key Metrics")
         if mode == "tc_oms":
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total Number of Orders", summary["total_pending_orders"])
-            m2.metric("Reflecting in OMS", summary["pushed_count"])
-            m3.metric("Missing in OMS", summary["not_pushed_count"])
-            mismatch_order_count = disc_df["Order ID"].nunique() if not disc_df.empty and "Order ID" in disc_df.columns else 0
-            m4.metric("Mismatch Order Count", mismatch_order_count)
+            m2.metric("Successfully Pushed", summary["pushed_count"])
+            m3.metric("Not Pushed to OMS", summary["not_pushed_count"])
+            m4.metric("Unpaid Orders", summary["unpaid_count"])
+            m5.metric("Status Discrepancies", summary["total_discrepancies"], 
+                      delta=summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else None, 
+                      delta_color="inverse")
             
             if summary["all_imported_to_tc"]:
                 st.success("🎉 **All active TC orders are successfully verified in OMS!**")
         elif mode in ("order_status_reconciliation", "tc_oms"):
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total TC Orders", summary["total_pending_orders"])
-            m2.metric("Reflecting in OMS", summary["pushed_count"])
-            m3.metric("Status Discrepancies in OMS", summary["not_pushed_count"])
+            m2.metric("Successfully Pushed", summary["pushed_count"])
+            m3.metric("Not Pushed to OMS", summary["not_pushed_count"])
+            m4.metric("Unpaid Orders", summary["unpaid_count"])
+            m5.metric("Status Discrepancies", summary["total_discrepancies"], 
+                      delta=summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else None, 
+                      delta_color="inverse")
             
             if summary["all_imported_to_tc"]:
                 st.success("🎉 **All TC orders are successfully verified in OMS!**")
             else:
-                st.error(f"⚠️ **Found {summary['not_pushed_count']} status discrepancies between TC and OMS!**")
+                st.error(f"⚠️ **Found {summary['total_discrepancies']} status discrepancies between TC and OMS!**")
         elif mode == "order_flow_check":
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Total Marketplace & TC Orders", summary["total_pending_orders"])
-            m2.metric("Reflecting in OMS", summary["pushed_count"])
-            m3.metric("Missing & Mismatches", summary["not_pushed_count"])
+            m2.metric("Successfully Pushed", summary["pushed_count"])
+            m3.metric("Not Pushed to OMS", summary["not_pushed_count"])
+            m4.metric("Unpaid Orders", summary["unpaid_count"])
+            m5.metric("Status Discrepancies", summary["total_discrepancies"], 
+                      delta=summary["total_discrepancies"] if summary["total_discrepancies"] > 0 else None, 
+                      delta_color="inverse")
             
             if summary["all_imported_to_tc"]:
                 st.success("🎉 **All Marketplace orders reflect in TC and match OMS!**")
             else:
-                st.error(f"⚠️ **Found {summary['not_pushed_count']} missing or status mismatch orders!**")
+                st.error(f"⚠️ **Found {summary['total_discrepancies']} missing or status mismatch orders!**")
         elif mode == "tc_marketplace":
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Marketplace Orders", summary["total_pending_orders"])
@@ -721,3 +731,6 @@ else:
                             st.success(f"✅ {msg}")
                         else:
                             st.error(f"❌ {msg}")
+        
+
+
