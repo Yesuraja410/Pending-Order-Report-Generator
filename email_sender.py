@@ -160,6 +160,130 @@ def _send_via_brevo(api_key, sender_email, sender_name, to_email, cc_email, subj
         return False, f"Brevo send failed: {str(e)}"
 
 
+# ============================================================================
+# Google OAuth2 / Gmail API - "Sign in with Google" support
+# ============================================================================
+# This lets the app send email as a Gmail/Google Workspace account via
+# Google's official API instead of SMTP - no app password, no Office 365
+# tenant policy issues. Since the app sends automatically/on a schedule with
+# nobody present to click "Allow" each time, the flow is: sign in with Google
+# ONCE to get a refresh token, then the app silently exchanges that refresh
+# token for a fresh access token on every send (refresh tokens don't expire
+# unless revoked).
+
+GOOGLE_GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
+def build_google_auth_url(client_id, redirect_uri):
+    """Build the Google OAuth consent URL that requests Gmail-send access."""
+    from urllib.parse import urlencode
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": GOOGLE_GMAIL_SEND_SCOPE,
+        "access_type": "offline",   # required to get a refresh_token back
+        "prompt": "consent",        # forces a refresh_token even on repeat sign-ins
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+
+
+def exchange_google_code_for_tokens(client_id, client_secret, redirect_uri, code):
+    """Exchange a one-time OAuth authorization code for access + refresh tokens."""
+    try:
+        resp = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            timeout=15
+        )
+        if resp.status_code == 200:
+            return True, resp.json()
+        return False, resp.text[:300]
+    except Exception as e:
+        return False, str(e)
+
+
+def _get_google_access_token(client_id, client_secret, refresh_token):
+    """Exchange a stored refresh token for a fresh (short-lived) access token."""
+    resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+        timeout=15
+    )
+    if resp.status_code == 200:
+        token = resp.json().get("access_token")
+        if token:
+            return token
+        raise Exception("Google did not return an access token.")
+    raise Exception(f"Failed to refresh Google access token: {resp.status_code} - {resp.text[:200]}")
+
+
+def test_google_connection(client_id, client_secret, refresh_token):
+    """Verify Google OAuth credentials by attempting to refresh an access token."""
+    try:
+        missing = []
+        if not str(client_id or "").strip():
+            missing.append("Google Client ID")
+        if not str(client_secret or "").strip():
+            missing.append("Google Client Secret")
+        if not str(refresh_token or "").strip():
+            missing.append("Refresh Token (click 'Sign in with Google' first)")
+        if missing:
+            return False, f"Google configuration incomplete. Missing: {', '.join(missing)}."
+        _get_google_access_token(client_id, client_secret, refresh_token)
+        return True, "Successfully connected to Google - access token refreshed OK!"
+    except Exception as e:
+        return False, f"Google connection failed: {str(e)}"
+
+
+def _send_via_gmail_api(client_id, client_secret, refresh_token, sender_email, to_email, cc_email,
+                         subject, html_body, attachment_bytes=None, attachment_filename=None):
+    """Send an email via the Gmail API using OAuth2 (no SMTP, no app password)."""
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+    try:
+        if not to_email or "@" not in to_email:
+            return False, "Recipient 'To' email address is required and must be valid."
+
+        access_token = _get_google_access_token(client_id, client_secret, refresh_token)
+
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = to_email
+        if cc_email:
+            msg["Cc"] = cc_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(html_body, "html"))
+        if attachment_bytes is not None and attachment_filename:
+            part = MIMEApplication(attachment_bytes, _subtype="xlsx")
+            part.add_header("Content-Disposition", "attachment", filename=attachment_filename)
+            msg.attach(part)
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        resp = requests.post(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={"raw": raw},
+            timeout=30
+        )
+        if resp.status_code in (200, 202):
+            return True, "Email sent successfully via Gmail!"
+        return False, f"Gmail send failed: {resp.status_code} - {resp.text[:300]}"
+    except Exception as e:
+        return False, f"Gmail send failed: {str(e)}"
+
+
 def send_seller_report_email(smtp_config, seller_name, recipient_email, seller_df, discrepancies_df=None):
     """
     Generate an Excel sheet for the seller, build a nice HTML summary, and send it via SMTP.
@@ -578,7 +702,25 @@ def send_country_report_email(smtp_config, country, to_email, cc_email, excel_by
             return True, f"Report email for PUMA {country} sent successfully via Brevo!"
         return False, msg
 
-    # -- Path 2: SMTP (Office 365 / other) --
+    # -- Path 2: Google / Gmail API (OAuth2, "Sign in with Google") --
+    if provider == "google":
+        ok, msg = _send_via_gmail_api(
+            client_id=smtp_config.get("google_client_id", ""),
+            client_secret=smtp_config.get("google_client_secret", ""),
+            refresh_token=smtp_config.get("google_refresh_token", ""),
+            sender_email=smtp_config.get("sender_email", ""),
+            to_email=to_email,
+            cc_email=cc_email,
+            subject=subject,
+            html_body=email_html,
+            attachment_bytes=excel_bytes,
+            attachment_filename=filename
+        )
+        if ok:
+            return True, f"Report email for PUMA {country} sent successfully via Gmail!"
+        return False, msg
+
+    # -- Path 3: SMTP (Office 365 / other) --
     user = smtp_config.get("user")
     # "From" is always the SMTP login/sender email - never a separately
     # entered address - per business requirement.
