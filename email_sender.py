@@ -817,3 +817,62 @@ def send_discrepancies_to_slack_email(smtp_config, discrepancies_df, ref_date_st
         return True, "Discrepancies report shared successfully to Slack group!"
     except Exception as e:
         return False, f"Failed to share to Slack: {str(e)}"
+
+
+def send_discrepancies_to_slack_webhook(webhook_url, discrepancies_df, ref_date_str, country=None, app_download_url=None):
+    """
+    Post a Status Discrepancies summary directly to a Slack channel via an
+    Incoming Webhook (https://api.slack.com/messaging/webhooks) - a simple
+    HTTPS POST, no SMTP/email involved.
+
+    NOTE: Slack Incoming Webhooks cannot carry file attachments (that needs
+    the separate Slack Files API with a bot token) - so this posts a
+    formatted text summary (counts + breakdown by Validation Result) with a
+    reminder to check the full report in the app, rather than an attached
+    Excel file.
+    """
+    try:
+        if not str(webhook_url or "").strip():
+            return False, "Slack Webhook URL is required."
+        if not webhook_url.startswith("https://hooks.slack.com/"):
+            return False, "That doesn't look like a valid Slack Incoming Webhook URL (should start with https://hooks.slack.com/)."
+
+        from datetime import datetime
+        date_suffix = ref_date_str if ref_date_str else datetime.today().strftime('%d-%m-%Y')
+        title = f"📋 Status Discrepancies{f' - {country}' if country else ''} ({date_suffix})"
+
+        if discrepancies_df is None or discrepancies_df.empty:
+            blocks = [
+                {"type": "header", "text": {"type": "plain_text", "text": title}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": "✅ No status discrepancies found today."}},
+            ]
+        else:
+            total = len(discrepancies_df)
+            breakdown_lines = []
+            if "Validation Result" in discrepancies_df.columns:
+                counts = discrepancies_df["Validation Result"].value_counts()
+                for label, cnt in counts.items():
+                    breakdown_lines.append(f"• *{label}*: {cnt}")
+            breakdown_text = "\n".join(breakdown_lines) if breakdown_lines else "_(no breakdown available)_"
+
+            blocks = [
+                {"type": "header", "text": {"type": "plain_text", "text": title}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"*Total Discrepancies:* {total}"}},
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text": breakdown_text}},
+            ]
+            if app_download_url:
+                blocks.append({"type": "divider"})
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"<{app_download_url}|Open the full report in the app>"}})
+
+        payload = {
+            "text": title,  # fallback text for notifications
+            "blocks": blocks
+        }
+
+        resp = requests.post(webhook_url, json=payload, timeout=15)
+        if resp.status_code == 200 and resp.text.strip().lower() == "ok":
+            return True, "Discrepancies summary posted to Slack successfully!"
+        return False, f"Slack webhook failed: {resp.status_code} - {resp.text[:300]}"
+    except Exception as e:
+        return False, f"Failed to post to Slack: {str(e)}"
