@@ -298,10 +298,40 @@ def load_file_safely(file):
             except Exception:
                 pass
             
-            # Fallback to reading bytes
+            # Ultimate fallback: parse with Python's built-in csv module
+            # directly, bypassing pandas' C/Python tokenizer entirely. This
+            # cannot raise a "tokenizing data" error no matter how ragged the
+            # rows are - rows with too many fields are skipped (recorded as a
+            # warning), rows with too few are padded with blanks.
             file.seek(0)
             raw = file.read()
-            df = pd.read_csv(io.BytesIO(raw), dtype=str)
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            import csv as _csv_module
+            reader = _csv_module.reader(io.StringIO(text))
+            all_rows = list(reader)
+            if not all_rows:
+                return pd.DataFrame()
+
+            header = all_rows[0]
+            n_cols = len(header)
+            clean_rows = []
+            skipped_count = 0
+            for r in all_rows[1:]:
+                if len(r) == n_cols:
+                    clean_rows.append(r)
+                elif len(r) > n_cols:
+                    skipped_count += 1
+                else:
+                    clean_rows.append(r + [""] * (n_cols - len(r)))
+
+            if skipped_count:
+                FILE_LOAD_WARNINGS.append(
+                    f"'{name}': skipped {skipped_count} malformed row(s) that had more fields than "
+                    f"the header (likely an unescaped comma in a text field like an address or "
+                    f"product name). These rows were NOT included in the report - please check the "
+                    f"source file for orders that may be missing."
+                )
+            df = pd.DataFrame(clean_rows, columns=header, dtype=str) if clean_rows else pd.DataFrame(columns=header)
             return df.dropna(how="all").reset_index(drop=True)
         else:
             # Excel - Scan all sheets to find the first non-empty one
