@@ -261,9 +261,34 @@ def load_file_safely(file):
     
     try:
         if name.endswith(".csv"):
+            # Detect delimiter safely by reading the first line/chunk
+            delim = ','
             try:
                 file.seek(0)
-                df = pd.read_csv(file, dtype=str)
+                first_bytes = file.read(2048)
+                first_line = first_bytes.decode('utf-8-sig', errors='ignore').split('\n')[0]
+                comma_count = first_line.count(',')
+                semicolon_count = first_line.count(';')
+                tab_count = first_line.count('\t')
+                
+                max_count = comma_count
+                if semicolon_count > max_count:
+                    delim = ';'
+                    max_count = semicolon_count
+                if tab_count > max_count:
+                    delim = '\t'
+                    max_count = tab_count
+            except Exception:
+                pass
+            finally:
+                try:
+                    file.seek(0)
+                except Exception:
+                    pass
+
+            try:
+                file.seek(0)
+                df = pd.read_csv(file, sep=delim, dtype=str)
                 if not df.empty:
                     return df.dropna(how="all").reset_index(drop=True)
             except Exception:
@@ -285,7 +310,7 @@ def load_file_safely(file):
                     skipped_lines.append(bad_line)
                     return None  # tells pandas to drop this line and continue
 
-                df = pd.read_csv(file, dtype=str, engine="python", on_bad_lines=_capture_bad_line)
+                df = pd.read_csv(file, sep=delim, dtype=str, engine="python", on_bad_lines=_capture_bad_line)
                 if skipped_lines:
                     FILE_LOAD_WARNINGS.append(
                         f"'{name}': skipped {len(skipped_lines)} malformed row(s) that had an "
@@ -307,7 +332,7 @@ def load_file_safely(file):
             raw = file.read()
             text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
             import csv as _csv_module
-            reader = _csv_module.reader(io.StringIO(text))
+            reader = _csv_module.reader(io.StringIO(text), delimiter=delim)
             all_rows = list(reader)
             if not all_rows:
                 return pd.DataFrame()
@@ -2748,3 +2773,4 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
         "tc_lookup": tc_lookup,
         "oms_lookup": oms_lookup
     }
+
