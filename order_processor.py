@@ -1432,6 +1432,9 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
 
     main_rows = []
     discrepancy_rows = []
+    unpaid_count = 0
+    pushed_count = 0
+    not_pushed_count = 0
 
     # Mode 4 Check: If Marketplace reports are uploaded alongside TC and OMS (Order Flow Check)
     mode_name = "order_status_reconciliation"
@@ -1496,6 +1499,14 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             pay_stat = oms_pay_status_map[oid_str]
         if not pay_meth and oid_str in oms_pay_method_map:
             pay_meth = oms_pay_method_map[oid_str]
+
+        # Check if this order is an Unpaid Order (payment status is NOT_INITIATED, etc. and method is not COD)
+        is_unpaid = False
+        if pay_stat:
+            is_cod = any(term in pay_meth.lower() for term in ["cod", "cash on delivery", "cashondelivery"])
+            is_pending = (pay_stat.lower() in ("pending", "unpaid", "awaiting", "not_initiated", "not_initiate", "not initiated"))
+            if is_pending and not is_cod:
+                is_unpaid = True
 
         oms_stat = ""
         oms_line_stat = ""
@@ -1569,7 +1580,16 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "Successfully Pushed to OMS"
         is_disc = False
 
-        if tc_is_return_final:
+        if is_unpaid and (not oms_stat or oms_stat == "Not in OMS"):
+            val_result = "Not Pushed to OMS - Unpaid orders"
+            details = "Order is unpaid in TC and not pushed to OMS."
+            final_remarks = "Not Pushed to OMS - Unpaid orders"
+            oms_stat = "Not in OMS - Unpaid orders"
+            oms_line_stat = "Not in OMS - Unpaid orders"
+            is_disc = False
+            unpaid_count += 1
+
+        elif tc_is_return_final:
             # FIX: previously only checked oms_is_shipped/oms_is_packed, so
             # Returned(TC) + Delivered(OMS) silently passed as "Ignored". Per
             # the reference sheet this combination must be flagged.
@@ -1618,12 +1638,14 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
             details = "Paid or COD order is present in TC but missing from OMS Report."
             final_remarks = "Not Pushed to OMS"
             is_disc = True
+            not_pushed_count += 1
 
         elif not oms_stat or oms_stat == "Not in OMS":
             val_result = "Not in OMS"
             details = f"TC Item Status is '{tc_item_stat or tc_stat}', but order is missing from OMS Report."
             final_remarks = "Not in OMS"
             is_disc = True
+            not_pushed_count += 1
 
         elif tc_is_blank and oms_is_delivered:
             # TC Item Status missing but OMS already shows Delivered - flag per
@@ -1687,6 +1709,11 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
                 details = "TC Item Status and OMS Line Status match."
                 final_remarks = f"Successfully Pushed to OMS ({oms_stat})" if oms_stat else "OK"
 
+        # Check if it was successfully pushed to OMS
+        is_pushed = oms_stat and oms_stat != "Not in OMS" and "not in oms" not in str(oms_stat).lower()
+        if is_pushed:
+            pushed_count += 1
+
         row_data = {
             "Order ID": oid_str,
             "Store Name": store_val,
@@ -1735,9 +1762,9 @@ def run_tc_oms_reconciliation(df_tc, df_marketplace, df_oms):
         "total_discrepancies": total_discrepancies,
         "cancelled_mismatches": len([r for r in main_rows if "Cancelled" in r["Validation Result"]]),
         "packed_mismatches": len([r for r in main_rows if "Packed" in r["Validation Result"]]),
-        "pushed_count": reflected_count,
-        "not_pushed_count": missing_count,
-        "unpaid_count": 0,
+        "pushed_count": pushed_count,
+        "not_pushed_count": not_pushed_count,
+        "unpaid_count": unpaid_count,
         "total_sellers": len(seller_groups),
         "all_imported_to_tc": (total_discrepancies == 0),
         "mode": mode_name
