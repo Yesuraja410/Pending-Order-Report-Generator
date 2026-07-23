@@ -879,3 +879,84 @@ def send_discrepancies_to_slack_webhook(webhook_url, discrepancies_df, ref_date_
         return False, f"Slack webhook failed: {resp.status_code} - {resp.text[:300]}"
     except Exception as e:
         return False, f"Failed to post to Slack: {str(e)}"
+
+
+# ============================================================================
+# Slack Bot Token - actual Excel FILE upload
+# ============================================================================
+# Incoming Webhooks (above) can only post text/Block Kit messages - they
+# cannot carry file attachments. To post the real Excel file into a Slack
+# channel (not just a text summary), Slack requires a Bot Token with the
+# `files:write` scope and their current 3-step upload flow (the old single-
+# call `files.upload` endpoint was deprecated).
+
+def test_slack_bot_token(bot_token):
+    """Verify a Slack Bot Token is valid by calling auth.test."""
+    try:
+        if not str(bot_token or "").strip():
+            return False, "Slack Bot Token is required."
+        resp = requests.post(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {bot_token}"},
+            timeout=15
+        )
+        data = resp.json()
+        if data.get("ok"):
+            team = data.get("team", "")
+            return True, f"Successfully connected to Slack!{f' (Workspace: {team})' if team else ''}"
+        return False, f"Slack token check failed: {data.get('error', 'unknown error')}"
+    except Exception as e:
+        return False, f"Slack connection failed: {str(e)}"
+
+
+def send_excel_to_slack_channel(bot_token, channel_id, excel_bytes, filename, initial_comment=None):
+    """
+    Upload and share an Excel file directly into a Slack channel using a Bot
+    Token, via Slack's current 3-step external upload flow:
+      1. files.getUploadURLExternal - get a one-time upload URL
+      2. POST the raw file bytes to that URL
+      3. files.completeUploadExternal - finalize and share it into the channel
+    """
+    try:
+        if not str(bot_token or "").strip():
+            return False, "Slack Bot Token is required."
+        if not str(channel_id or "").strip():
+            return False, "Slack Channel ID is required."
+
+        headers = {"Authorization": f"Bearer {bot_token}"}
+
+        # Step 1: get an upload URL
+        step1 = requests.post(
+            "https://slack.com/api/files.getUploadURLExternal",
+            headers=headers,
+            data={"filename": filename, "length": len(excel_bytes)},
+            timeout=20
+        )
+        step1_data = step1.json()
+        if not step1_data.get("ok"):
+            return False, f"Slack upload-URL request failed: {step1_data.get('error', 'unknown error')}"
+        upload_url = step1_data["upload_url"]
+        file_id = step1_data["file_id"]
+
+        # Step 2: upload the raw bytes
+        step2 = requests.post(upload_url, files={"file": (filename, excel_bytes)}, timeout=30)
+        if step2.status_code != 200:
+            return False, f"Slack file upload failed: {step2.status_code} - {step2.text[:200]}"
+
+        # Step 3: complete the upload and share it into the channel
+        step3 = requests.post(
+            "https://slack.com/api/files.completeUploadExternal",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "files": [{"id": file_id, "title": filename}],
+                "channel_id": channel_id,
+                "initial_comment": initial_comment or ""
+            },
+            timeout=20
+        )
+        step3_data = step3.json()
+        if step3_data.get("ok"):
+            return True, "Excel file shared to Slack successfully!"
+        return False, f"Slack upload-completion failed: {step3_data.get('error', 'unknown error')}"
+    except Exception as e:
+        return False, f"Failed to share file to Slack: {str(e)}"
