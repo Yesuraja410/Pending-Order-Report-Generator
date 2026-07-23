@@ -325,6 +325,7 @@ else:
                 st.session_state["order_id_col"] = res["pending_order_id_col"]
                 st.session_state["order_country_reports"] = res["country_reports"]
                 st.session_state["order_ref_date_dmy"] = res.get("ref_date_dmy", "")
+                st.session_state["order_file_load_warnings"] = res.get("file_load_warnings", [])
                 st.success("Validation complete! See results below.")
 
             except Exception as e:
@@ -338,6 +339,13 @@ else:
         disc_df = st.session_state["order_disc_df"]
         seller_groups = st.session_state["order_groups"]
         country_reports = st.session_state.get("order_country_reports", {})
+
+        file_load_warnings = st.session_state.get("order_file_load_warnings", [])
+        if file_load_warnings:
+            with st.expander(f"⚠️ {len(file_load_warnings)} file-loading warning(s) - some rows may be missing from the report", expanded=True):
+                for w in file_load_warnings:
+                    st.warning(w)
+
         
         mode = summary.get("mode", "standard")
         has_pending = (mode != "tc_marketplace")
