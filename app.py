@@ -18,9 +18,8 @@ st.set_page_config(
 from styles import inject_css
 from order_processor import process_and_validate_orders
 from email_sender import (
-    test_smtp_connection, test_brevo_connection, send_seller_report_email,
-    build_google_auth_url, exchange_google_code_for_tokens, test_google_connection,
-    send_discrepancies_to_slack_webhook
+    test_smtp_connection, send_seller_report_email,
+    send_discrepancies_to_slack_webhook, test_slack_bot_token, send_excel_to_slack_channel
 )
 import excel_formatter
 
@@ -64,159 +63,44 @@ else:
         "Community Cloud across restarts/redeploys. See the note at the bottom of this section to make it permanent."
     )
 
-provider_options = ["Office 365 / SMTP", "Brevo (API - use if SMTP is blocked)", "Google (Gmail API - Sign in with Google)"]
-default_provider_idx = {"smtp": 0, "brevo": 1, "google": 2}.get(smtp_defaults.get("provider"), 0)
-email_provider_choice = st.selectbox("Email Provider", provider_options, index=default_provider_idx, key="email_provider_select")
-provider = "brevo" if email_provider_choice.startswith("Brevo") else ("google" if email_provider_choice.startswith("Google") else "smtp")
+provider = "smtp"
 
 with st.expander("Configure Email Settings", expanded=False):
+    c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
+    c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
+    c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
+    c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
+    c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
+    c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
+    c_api_key = ""
     c_google_client_id, c_google_client_secret, c_google_refresh_token = "", "", ""
 
-    if provider == "smtp":
-        c_host = st.text_input("SMTP Server Host", value=smtp_defaults.get("host", "smtp.office365.com"), key="smtp_host")
-        c_port = st.text_input("SMTP Port", value=str(smtp_defaults.get("port", 587)), key="smtp_port")
-        c_user = st.text_input("SMTP Username", value=smtp_defaults.get("user", ""), key="smtp_user")
-        c_pass = st.text_input("SMTP Password", type="password", value=smtp_defaults.get("password", ""), key="smtp_pass")
-        c_sender = st.text_input("Sender Email Address", value=smtp_defaults.get("sender_email", smtp_defaults.get("user", "")), key="smtp_sender")
-        c_tls = st.checkbox("Use TLS", value=smtp_defaults.get("use_tls", True), key="smtp_tls")
-        c_api_key = ""
-
-        if st.button("Test Connection"):
-            is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
-            if is_ok:
-                st.success(msg)
-                try:
-                    with open("config.json", "r") as f:
-                        cfg_data = json.load(f)
-                except Exception:
-                    cfg_data = {}
-                cfg_data["smtp_config"] = {
-                    "provider": "smtp",
-                    "host": c_host,
-                    "port": int(c_port) if c_port.isdigit() else 587,
-                    "user": c_user,
-                    "password": c_pass,
-                    "sender_email": c_sender,
-                    "use_tls": c_tls
-                }
-                try:
-                    with open("config.json", "w") as f:
-                        json.dump(cfg_data, f, indent=4)
-                    st.info("Saved SMTP configuration to config.json!")
-                except Exception as save_err:
-                    st.warning(f"Could not save config.json: {save_err}")
-            else:
-                st.error(msg)
-    elif provider == "brevo":
-        st.caption(
-            "Sign up free at brevo.com, verify a sender email/domain, and paste your API key here. "
-            "This bypasses Office 365 SMTP entirely - no MFA app passwords or tenant SMTP AUTH settings needed."
-        )
-        c_api_key = st.text_input("Brevo API Key", type="password", value=smtp_defaults.get("api_key", ""), key="brevo_api_key")
-        c_sender = st.text_input("Sender Email Address (must be a verified sender in Brevo)", value=smtp_defaults.get("sender_email", ""), key="brevo_sender")
-        c_host, c_port, c_user, c_pass, c_tls = "", "", "", "", True
-
-        if st.button("Test Connection", key="test_brevo_btn"):
-            is_ok, msg = test_brevo_connection(c_api_key)
-            if is_ok:
-                st.success(msg)
-                try:
-                    with open("config.json", "r") as f:
-                        cfg_data = json.load(f)
-                except Exception:
-                    cfg_data = {}
-                cfg_data["smtp_config"] = {
-                    "provider": "brevo",
-                    "api_key": c_api_key,
-                    "sender_email": c_sender
-                }
-                try:
-                    with open("config.json", "w") as f:
-                        json.dump(cfg_data, f, indent=4)
-                    st.info("Saved Brevo configuration to config.json!")
-                except Exception as save_err:
-                    st.warning(f"Could not save config.json: {save_err}")
-            else:
-                st.error(msg)
-
-    else:  # provider == "google"
-        st.caption(
-            "Requires a one-time Google Cloud setup: create a project at console.cloud.google.com, "
-            "enable the **Gmail API**, configure the OAuth consent screen, and create an OAuth Client ID "
-            "(type: **Web application**) with this app's exact URL added as an Authorized redirect URI."
-        )
-        c_google_client_id = st.text_input("Google Client ID", value=smtp_defaults.get("google_client_id", ""), key="g_client_id")
-        c_google_client_secret = st.text_input("Google Client Secret", type="password", value=smtp_defaults.get("google_client_secret", ""), key="g_client_secret")
-        g_redirect_uri = st.text_input(
-            "Redirect URI (must exactly match the one registered in Google Cloud Console)",
-            value=smtp_defaults.get("google_redirect_uri", ""),
-            key="g_redirect_uri",
-            help="This app's own public URL, e.g. https://your-app-name.streamlit.app"
-        )
-        c_sender = st.text_input("Sender Gmail Address", value=smtp_defaults.get("sender_email", ""), key="g_sender")
-        c_host, c_port, c_user, c_pass, c_tls, c_api_key = "", "", "", "", True, ""
-
-        # Pull any refresh token already captured this session, else fall back
-        # to whatever's in Secrets/config.json.
-        c_google_refresh_token = st.session_state.get("g_refresh_token", smtp_defaults.get("google_refresh_token", ""))
-
-        # -- Handle the redirect back from Google (contains ?code=...) --
-        query_code = st.query_params.get("code")
-        if query_code and c_google_client_id and c_google_client_secret and g_redirect_uri and not st.session_state.get("g_oauth_processed"):
-            ok, result = exchange_google_code_for_tokens(c_google_client_id, c_google_client_secret, g_redirect_uri, query_code)
-            st.session_state["g_oauth_processed"] = True
-            if ok:
-                new_refresh_token = result.get("refresh_token", "")
-                if new_refresh_token:
-                    st.session_state["g_refresh_token"] = new_refresh_token
-                    c_google_refresh_token = new_refresh_token
-                    st.success("✅ Signed in with Google! Refresh token captured below - save it to Secrets to make this permanent.")
-                else:
-                    st.warning(
-                        "Signed in, but Google didn't return a refresh token (it only issues one on the very "
-                        "first consent for an app). Revoke access at https://myaccount.google.com/permissions "
-                        "for this app, then click Sign in with Google again."
-                    )
-            else:
-                st.error(f"Google sign-in failed: {result}")
-            st.query_params.clear()
-
-        if c_google_refresh_token:
-            st.text_input("Refresh Token (auto-filled after sign-in)", value=c_google_refresh_token, key="g_refresh_token_display", disabled=True)
+    if st.button("Test Connection"):
+        is_ok, msg = test_smtp_connection(c_host, c_port, c_user, c_pass, c_tls)
+        if is_ok:
+            st.success(msg)
+            try:
+                with open("config.json", "r") as f:
+                    cfg_data = json.load(f)
+            except Exception:
+                cfg_data = {}
+            cfg_data["smtp_config"] = {
+                "provider": "smtp",
+                "host": c_host,
+                "port": int(c_port) if c_port.isdigit() else 587,
+                "user": c_user,
+                "password": c_pass,
+                "sender_email": c_sender,
+                "use_tls": c_tls
+            }
+            try:
+                with open("config.json", "w") as f:
+                    json.dump(cfg_data, f, indent=4)
+                st.info("Saved SMTP configuration to config.json!")
+            except Exception as save_err:
+                st.warning(f"Could not save config.json: {save_err}")
         else:
-            st.info("Not signed in yet - fill in Client ID, Client Secret and Redirect URI above, then click Sign in with Google below.")
-
-        if c_google_client_id and g_redirect_uri:
-            st.link_button("🔐 Sign in with Google", build_google_auth_url(c_google_client_id, g_redirect_uri), use_container_width=True)
-        else:
-            st.caption("Enter Client ID and Redirect URI above to enable Sign-In.")
-
-        if st.button("Test Connection", key="test_google_btn"):
-            is_ok, msg = test_google_connection(c_google_client_id, c_google_client_secret, c_google_refresh_token)
-            if is_ok:
-                st.success(msg)
-                try:
-                    with open("config.json", "r") as f:
-                        cfg_data = json.load(f)
-                except Exception:
-                    cfg_data = {}
-                cfg_data["smtp_config"] = {
-                    "provider": "google",
-                    "google_client_id": c_google_client_id,
-                    "google_client_secret": c_google_client_secret,
-                    "google_refresh_token": c_google_refresh_token,
-                    "google_redirect_uri": g_redirect_uri,
-                    "sender_email": c_sender
-                }
-                try:
-                    with open("config.json", "w") as f:
-                        json.dump(cfg_data, f, indent=4)
-                    st.info("Saved Google configuration to config.json!")
-                except Exception as save_err:
-                    st.warning(f"Could not save config.json: {save_err}")
-            else:
-                st.error(msg)
-
+            st.error(msg)
 smtp_config = {
     "provider": provider,
     "host": c_host,
@@ -250,25 +134,6 @@ if not using_secrets:
             'use_tls = true\n',
             language="toml"
         )
-        st.caption("Or, if using Brevo instead:")
-        st.code(
-            '[smtp]\n'
-            'provider = "brevo"\n'
-            'api_key = "your-brevo-api-key-here"\n'
-            'sender_email = "yesuraja@graas.ai"\n',
-            language="toml"
-        )
-        st.caption("Or, if using Google (Gmail API) instead:")
-        st.code(
-            '[smtp]\n'
-            'provider = "google"\n'
-            'google_client_id = "xxxxx.apps.googleusercontent.com"\n'
-            'google_client_secret = "your-client-secret-here"\n'
-            'google_refresh_token = "the-refresh-token-shown-after-you-sign-in"\n'
-            'google_redirect_uri = "https://your-app-name.streamlit.app"\n'
-            'sender_email = "yourname@gmail.com"\n',
-            language="toml"
-        )
         st.caption(
             "Once saved there, the app will automatically pick it up on every restart - no more "
             "re-entering credentials, and the message above will change to confirm it's loaded from Secrets."
@@ -296,7 +161,8 @@ if using_slack_secrets:
 else:
     st.caption("⚠️ No Slack Secrets found - using config.json (does not persist across restarts) or the field below.")
 
-with st.expander("Configure Slack Webhook", expanded=False):
+with st.expander("Configure Slack", expanded=False):
+    st.markdown("**Text summary via Webhook** (posts counts/breakdown only, no file):")
     st.caption(
         "Paste an Incoming Webhook URL from your Slack app (Slack → App settings → Incoming Webhooks). "
         "Treat this like a password - anyone with the URL can post into that channel."
@@ -307,13 +173,44 @@ with st.expander("Configure Slack Webhook", expanded=False):
         value=slack_defaults.get("webhook_url", ""),
         key="slack_webhook_url_input"
     )
-    if st.button("Save Webhook (this session / config.json)"):
+
+    st.markdown("---")
+    st.markdown("**Actual Excel file upload** (needs a Slack Bot Token, not a webhook):")
+    st.caption(
+        "Webhooks can't carry file attachments - Slack requires a Bot Token to post the real Excel file. "
+        "Create a Slack App at api.slack.com/apps → OAuth & Permissions → add the `files:write` scope → "
+        "install the app to your workspace → copy the Bot User OAuth Token (starts with `xoxb-`). "
+        "The Channel ID is found at the bottom of a channel's 'About' panel in Slack (starts with `C`)."
+    )
+    slack_bot_token = st.text_input(
+        "Slack Bot Token (xoxb-...)",
+        type="password",
+        value=slack_defaults.get("bot_token", ""),
+        key="slack_bot_token_input"
+    )
+    slack_channel_id = st.text_input(
+        "Slack Channel ID",
+        value=slack_defaults.get("channel_id", ""),
+        key="slack_channel_id_input"
+    )
+    if st.button("Test Slack Bot Token"):
+        is_ok, msg = test_slack_bot_token(slack_bot_token)
+        if is_ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+
+    if st.button("Save Slack Config (this session / config.json)"):
         try:
             with open("config.json", "r") as f:
                 cfg_data = json.load(f)
         except Exception:
             cfg_data = {}
-        cfg_data["slack_config"] = {"webhook_url": slack_webhook_url}
+        cfg_data["slack_config"] = {
+            "webhook_url": slack_webhook_url,
+            "bot_token": slack_bot_token,
+            "channel_id": slack_channel_id
+        }
         try:
             with open("config.json", "w") as f:
                 json.dump(cfg_data, f, indent=4)
@@ -323,7 +220,33 @@ with st.expander("Configure Slack Webhook", expanded=False):
 
     if not using_slack_secrets:
         st.caption("To make this permanent, add to Streamlit Secrets (Manage app → Settings → Secrets):")
-        st.code('[slack]\nwebhook_url = "https://hooks.slack.com/services/XXX/XXX/XXXXXXXX"\n', language="toml")
+        st.code(
+            '[slack]\n'
+            'webhook_url = "https://hooks.slack.com/services/XXX/XXX/XXXXXXXX"\n'
+            'bot_token = "xoxb-your-bot-token-here"\n'
+            'channel_id = "C0123456789"\n',
+            language="toml"
+        )
+
+
+def _share_discrepancies_to_slack(df, ref_date_str):
+    """
+    Shared helper used by every 'Share to Slack' button. Prefers uploading
+    the actual Excel file (needs Bot Token + Channel ID); falls back to a
+    text-only summary via Webhook if no Bot Token is configured.
+    """
+    if slack_bot_token and slack_channel_id:
+        excel_bytes = excel_formatter.generate_fast_excel_bytes({"Status Discrepancies": df})
+        filename = f"Status_Discrepancies_{ref_date_str or datetime.today().strftime('%d-%m-%Y')}.xlsx"
+        return send_excel_to_slack_channel(
+            slack_bot_token, slack_channel_id, excel_bytes, filename,
+            initial_comment=f"📋 Status Discrepancies Report ({ref_date_str or datetime.today().strftime('%d-%m-%Y')}) - {len(df)} total"
+        )
+    elif slack_webhook_url:
+        return send_discrepancies_to_slack_webhook(slack_webhook_url, df, ref_date_str)
+    else:
+        return False, "No Slack Bot Token/Channel or Webhook URL configured - set one up in the Slack Integration section above."
+
 
 # == Sidebar ==================================================================-
 with st.sidebar:
@@ -408,40 +331,7 @@ else:
                 st.session_state["order_country_reports"] = res["country_reports"]
                 st.session_state["order_ref_date_dmy"] = res.get("ref_date_dmy", "")
                 st.success("Validation complete! See results below.")
-                
-                # Automatically share discrepancies to Slack group
-                disc_df_to_slack = res["discrepancies_df"]
-                if not disc_df_to_slack.empty:
-                    smtp_cfg = {}
-                    if st.session_state.get("smtp_host"):
-                        smtp_cfg = {
-                            "host": st.session_state.get("smtp_host"),
-                            "port": int(st.session_state.get("smtp_port")) if str(st.session_state.get("smtp_port")).isdigit() else 587,
-                            "user": st.session_state.get("smtp_user"),
-                            "password": st.session_state.get("smtp_pass"),
-                            "sender_email": st.session_state.get("smtp_sender"),
-                            "use_tls": st.session_state.get("smtp_tls", True)
-                        }
-                    
-                    if not smtp_cfg or not smtp_cfg.get("host") or not smtp_cfg.get("user"):
-                        try:
-                            with open("config.json", "r") as config_file:
-                                cfg = json.load(config_file)
-                                smtp_cfg = cfg.get("smtp_config", {})
-                        except Exception:
-                            pass
-                    
-                    if smtp_cfg and smtp_cfg.get("host") and smtp_cfg.get("user"):
-                        from email_sender import send_discrepancies_to_slack_email
-                        success_slack, msg_slack = send_discrepancies_to_slack_email(
-                            smtp_config=smtp_cfg,
-                            discrepancies_df=disc_df_to_slack,
-                            ref_date_str=res.get("ref_date_dmy", "")
-                        )
-                        if success_slack:
-                            st.success("📢 Automatically shared status discrepancies report to Slack channel `#order-related-issues`!")
-                        else:
-                            st.warning(f"⚠️ Could not automatically share discrepancies to Slack: {msg_slack}")
+
             except Exception as e:
                 st.error(f"Error during order processing: {str(e)}")
                 st.exception(e)
@@ -612,15 +502,12 @@ else:
 
                 st.markdown("---")
                 if st.button("💬 Share to Slack", key="slack_send_mode1"):
-                    if not slack_webhook_url:
-                        st.error("❌ No Slack Webhook URL configured - set it in the Slack Integration section above.")
-                    else:
-                        with st.spinner("Posting to Slack..."):
-                            ok, msg = send_discrepancies_to_slack_webhook(slack_webhook_url, disc_df, ref_date_dmy)
-                            if ok:
-                                st.success(f"✅ {msg}")
-                            else:
-                                st.error(f"❌ {msg}")
+                    with st.spinner("Sharing to Slack..."):
+                        ok, msg = _share_discrepancies_to_slack(disc_df, ref_date_dmy)
+                        if ok:
+                            st.success(f"✅ {msg}")
+                        else:
+                            st.error(f"❌ {msg}")
 
             with sub_tab3:
                 st.markdown("#### Country Pivot Summary & Email sharing")
@@ -772,15 +659,12 @@ else:
 
                 st.markdown("---")
                 if st.button("💬 Share to Slack", key="slack_send_mode2"):
-                    if not slack_webhook_url:
-                        st.error("❌ No Slack Webhook URL configured - set it in the Slack Integration section above.")
-                    else:
-                        with st.spinner("Posting to Slack..."):
-                            ok, msg = send_discrepancies_to_slack_webhook(slack_webhook_url, export_disc_df, datetime.today().strftime('%d-%m-%Y'))
-                            if ok:
-                                st.success(f"✅ {msg}")
-                            else:
-                                st.error(f"❌ {msg}")
+                    with st.spinner("Sharing to Slack..."):
+                        ok, msg = _share_discrepancies_to_slack(export_disc_df, datetime.today().strftime('%d-%m-%Y'))
+                        if ok:
+                            st.success(f"✅ {msg}")
+                        else:
+                            st.error(f"❌ {msg}")
 
         else:
             # Mode 3: Order Status Reconciliation (File 2 + File 4: TC + OMS)
@@ -828,12 +712,9 @@ else:
 
                 st.markdown("---")
                 if st.button("💬 Share to Slack", key="slack_send_mode3"):
-                    if not slack_webhook_url:
-                        st.error("❌ No Slack Webhook URL configured - set it in the Slack Integration section above.")
-                    else:
-                        with st.spinner("Posting to Slack..."):
-                            ok, msg = send_discrepancies_to_slack_webhook(slack_webhook_url, export_disc_df, datetime.today().strftime('%d-%m-%Y'))
-                            if ok:
-                                st.success(f"✅ {msg}")
-                            else:
-                                st.error(f"❌ {msg}")
+                    with st.spinner("Sharing to Slack..."):
+                        ok, msg = _share_discrepancies_to_slack(export_disc_df, datetime.today().strftime('%d-%m-%Y'))
+                        if ok:
+                            st.success(f"✅ {msg}")
+                        else:
+                            st.error(f"❌ {msg}")
