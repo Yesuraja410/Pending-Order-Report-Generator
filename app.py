@@ -531,9 +531,18 @@ else:
                 # here; it's taken from the SMTP login/sender email configured
                 # above.
                 COUNTRY_EMAIL_DEFAULTS = {
-                    "SG": {"to": "s.sudharsan@graas.ai", "cc": "yesuraja@graas.ai"},
-                    "MY": {"to": "s.sudharsan@graas.ai", "cc": "yesuraja@graas.ai"},
-                    "PH": {"to": "s.sudharsan@graas.ai", "cc": "yesuraja@graas.ai"},
+                    "SG": {
+                        "to": "sharon.chua@puma.com, gp_puma_sg_ops@ych.com, kayla.zhang@puma.com",
+                        "cc": "josegabriel.mendoza@puma.com, puma-ecops@graas.ai, sonal.aggarwal@puma.com, am-ged-puma-graas@graas.ai"
+                    },
+                    "MY": {
+                        "to": "sharon.chua@puma.com, kayla.zhang@puma.com",
+                        "cc": "josegabriel.mendoza@puma.com, am-ged-puma-graas@graas.ai, sophia.gaboy.ext@puma.com, puma-ecops@graas.ai, sonal.aggarwal@puma.com"
+                    },
+                    "PH": {
+                        "to": "julianrose.ilagan@ph.zalora.com, sharon.chua@puma.com, sophia.gaboy.ext@puma.com, josegabriel.mendoza@puma.com",
+                        "cc": "sonal.aggarwal@puma.com, puma-ecops@graas.ai, kayla.zhang@puma.com, am-ged-puma-graas@graas.ai"
+                    },
                 }
 
                 country_sel = st.selectbox("Select Country", ["SG", "MY", "PH"])
