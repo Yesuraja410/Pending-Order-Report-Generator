@@ -518,14 +518,14 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
 
         row_html = "<tr>"
         if is_grand_total_row:
-            row_html += '<td colspan="2" style="border:1px solid #bfbfbf;padding:6px 10px;font-weight:700;background:#f2f2f2;">Grand Total</td>'
+            row_html += '<td colspan="2" style="border:1px solid #bfbfbf;padding:6px 10px;font-weight:700;background:#f2f2f2;white-space:nowrap;">Grand Total</td>'
         else:
             if mp_val not in printed_marketplace:
                 rowspan = int(marketplace_counts.get(mp_val, 1))
-                row_html += f'<td rowspan="{rowspan}" style="border:1px solid #bfbfbf;padding:6px 10px;font-weight:600;background:#ffffff;vertical-align:middle;">{mp_val}</td>'
+                row_html += f'<td rowspan="{rowspan}" style="border:1px solid #bfbfbf;padding:6px 10px;font-weight:600;background:#ffffff;vertical-align:middle;white-space:nowrap;">{mp_val}</td>'
                 printed_marketplace.add(mp_val)
             # Status text shown exactly as-is - "Not in OMS" stays "Not in OMS".
-            row_html += f'<td style="border:1px solid #bfbfbf;padding:6px 10px;background:#ffffff;">{status_val}</td>'
+            row_html += f'<td style="border:1px solid #bfbfbf;padding:6px 10px;background:#ffffff;white-space:nowrap;">{status_val}</td>'
 
         for dc in date_cols:
             val = row.get(dc, 0)
@@ -534,7 +534,7 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
             except Exception:
                 val_int = 0
             val_disp = "" if val_int == 0 else str(val_int)
-            style = "border:1px solid #bfbfbf;padding:6px 10px;text-align:center;"
+            style = "border:1px solid #bfbfbf;padding:6px 10px;text-align:center;white-space:nowrap;"
             if is_grand_total_row:
                 style += "font-weight:700;background:#f2f2f2;"
             elif val_disp:
@@ -553,19 +553,19 @@ def _build_country_pivot_email_html(country, pivot_df, summary_df, ref_date_dmy)
                 gt_disp = int(gt_val) if pd.notna(gt_val) else 0
             except Exception:
                 gt_disp = 0
-            row_html += f'<td style="border:1px solid #bfbfbf;padding:6px 10px;text-align:center;font-weight:700;background:#f2f2f2;">{gt_disp}</td>'
+            row_html += f'<td style="border:1px solid #bfbfbf;padding:6px 10px;text-align:center;font-weight:700;background:#f2f2f2;white-space:nowrap;">{gt_disp}</td>'
         row_html += "</tr>"
         body_rows.append(row_html)
 
     header_html = (
         '<tr>'
-        f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;text-align:left;">{marketplace_col}</th>'
-        f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;text-align:left;">{status_col}</th>'
+        f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;text-align:left;white-space:nowrap;">{marketplace_col}</th>'
+        f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;text-align:left;white-space:nowrap;">{status_col}</th>'
     )
     for dc in date_cols:
-        header_html += f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;">{dc}</th>'
+        header_html += f'<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;white-space:nowrap;min-width:85px;">{dc}</th>'
     if has_grand_total:
-        header_html += '<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;">Grand Total</th>'
+        header_html += '<th style="border:1px solid #bfbfbf;padding:8px 10px;background:#ffffff;color:#000000;white-space:nowrap;">Grand Total</th>'
     header_html += '</tr>'
 
     pivot_table_html = f"""
