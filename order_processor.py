@@ -874,8 +874,8 @@ def run_gsheet_oms_validation(df_pending, df_oms, df_contacts=None):
 
     # Enrich df_discrepancies with Order Number and Order Date from df_pending
     if not df_discrepancies.empty and not df_pending.empty:
-        id_to_num = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Number"].astype(str)))
-        id_to_date = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Date"].astype(str)))
+        id_to_num = dict(zip(df_pending[pend_id_col].astype(str), df_pending["Order Number"].astype(str)))
+        id_to_date = dict(zip(df_pending[pend_id_col].astype(str), df_pending["Order Date"].astype(str)))
         df_discrepancies["Order Number"] = df_discrepancies["Order ID"].astype(str).map(id_to_num)
         df_discrepancies["Order Date"] = df_discrepancies["Order ID"].astype(str).map(id_to_date)
         df_discrepancies["Order Number"] = df_discrepancies["Order Number"].fillna(df_discrepancies["Order ID"])
@@ -2698,8 +2698,8 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
 
     # Enrich df_discrepancies with Order Number and Order Date from df_pending
     if not df_discrepancies.empty and not df_pending.empty:
-        id_to_num = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Number"].astype(str)))
-        id_to_date = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Date"].astype(str)))
+        id_to_num = dict(zip(df_pending[pend_id_col].astype(str), df_pending["Order Number"].astype(str)))
+        id_to_date = dict(zip(df_pending[pend_id_col].astype(str), df_pending["Order Date"].astype(str)))
         df_discrepancies["Order Number"] = df_discrepancies["Order ID"].astype(str).map(id_to_num)
         df_discrepancies["Order Date"] = df_discrepancies["Order ID"].astype(str).map(id_to_date)
         df_discrepancies["Order Number"] = df_discrepancies["Order Number"].fillna(df_discrepancies["Order ID"])
