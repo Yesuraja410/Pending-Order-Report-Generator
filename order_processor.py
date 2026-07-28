@@ -850,11 +850,40 @@ def run_gsheet_oms_validation(df_pending, df_oms, df_contacts=None):
         df_pending[target_sla_col] = df_pending[target_sla_col].fillna("#N/A")
         df_pending[target_sla_col] = df_pending[target_sla_col].apply(extract_date)
 
+    # Ensure df_pending has Order Number and Order Date
+    if not df_pending.empty:
+        # Find order number column
+        pend_num_col_find = _find_column(df_pending, ["order_number", "Order Number", "Order_No", "Correct Order Number", "order_no"])
+        if pend_num_col_find and pend_num_col_find in df_pending.columns:
+            df_pending["Order Number"] = df_pending[pend_num_col_find].astype(str)
+        else:
+            df_pending["Order Number"] = df_pending[pend_id_col].astype(str)
+            
+        # Find order date column
+        pend_date_col_find = _find_column(df_pending, ["ordered_date", "order_date", "created_at", "created", "timeOrderCreated", "Order Date", "Order Date and Time", "Created time", "Created Time", "createdTime"])
+        if pend_date_col_find and pend_date_col_find in df_pending.columns:
+            df_pending["Order Date"] = df_pending[pend_date_col_find].astype(str)
+        else:
+            df_pending["Order Date"] = "Unknown"
+
     df_discrepancies = pd.DataFrame(discrepancies) if discrepancies else pd.DataFrame(columns=[
         "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
     if not df_discrepancies.empty and "SKU" in df_discrepancies.columns:
         df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
+
+    # Enrich df_discrepancies with Order Number and Order Date from df_pending
+    if not df_discrepancies.empty and not df_pending.empty:
+        id_to_num = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Number"].astype(str)))
+        id_to_date = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Date"].astype(str)))
+        df_discrepancies["Order Number"] = df_discrepancies["Order ID"].astype(str).map(id_to_num)
+        df_discrepancies["Order Date"] = df_discrepancies["Order ID"].astype(str).map(id_to_date)
+        df_discrepancies["Order Number"] = df_discrepancies["Order Number"].fillna(df_discrepancies["Order ID"])
+        df_discrepancies["Order Date"] = df_discrepancies["Order Date"].fillna("Unknown")
+        
+        # Reorder columns to put Order Number and Order Date right after Order ID
+        desired_cols = ["Order ID", "Order Number", "Order Date"] + [c for c in df_discrepancies.columns if c not in ["Order ID", "Order Number", "Order Date"]]
+        df_discrepancies = df_discrepancies[[c for c in desired_cols if c in df_discrepancies.columns]]
 
     # Seller grouping
     seller_email_map = _build_seller_email_map(df_contacts)
@@ -2646,11 +2675,39 @@ def run_standard_validation(df_pending, df_tc, df_oms, df_contacts):
     # Append missing in TC discrepancies
     filtered_discrepancies.extend(missing_tc_discrepancies)
 
+    # Ensure df_pending has Order Number and Order Date
+    if not df_pending.empty:
+        pend_id_col = _find_column(df_pending, ["order_id", "order_number", "Order ID", "Order No", "Order Number", "Order_No", "Order_ID"])
+        pend_num_col_find = _find_column(df_pending, ["order_number", "Order Number", "Order_No", "Correct Order Number", "order_no"])
+        if pend_num_col_find and pend_num_col_find in df_pending.columns:
+            df_pending["Order Number"] = df_pending[pend_num_col_find].astype(str)
+        elif pend_id_col:
+            df_pending["Order Number"] = df_pending[pend_id_col].astype(str)
+            
+        pend_date_col_find = _find_column(df_pending, ["ordered_date", "order_date", "created_at", "created", "timeOrderCreated", "Order Date", "Order Date and Time", "Created time", "Created Time", "createdTime"])
+        if pend_date_col_find and pend_date_col_find in df_pending.columns:
+            df_pending["Order Date"] = df_pending[pend_date_col_find].astype(str)
+        else:
+            df_pending["Order Date"] = "Unknown"
+
     df_discrepancies = pd.DataFrame(filtered_discrepancies) if filtered_discrepancies else pd.DataFrame(columns=[
         "Order ID", "Nickname", "Seller SKU", "Validation Result", "TC Order Status", "TC Item Status", "OMS Order Status", "OMS Line Status", "Details"
     ])
     if not df_discrepancies.empty and "SKU" in df_discrepancies.columns:
         df_discrepancies = df_discrepancies.rename(columns={"SKU": "Seller SKU"})
+
+    # Enrich df_discrepancies with Order Number and Order Date from df_pending
+    if not df_discrepancies.empty and not df_pending.empty:
+        id_to_num = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Number"].astype(str)))
+        id_to_date = dict(zip(df_pending["Order ID"].astype(str), df_pending["Order Date"].astype(str)))
+        df_discrepancies["Order Number"] = df_discrepancies["Order ID"].astype(str).map(id_to_num)
+        df_discrepancies["Order Date"] = df_discrepancies["Order ID"].astype(str).map(id_to_date)
+        df_discrepancies["Order Number"] = df_discrepancies["Order Number"].fillna(df_discrepancies["Order ID"])
+        df_discrepancies["Order Date"] = df_discrepancies["Order Date"].fillna("Unknown")
+        
+        # Reorder columns to put Order Number and Order Date right after Order ID
+        desired_cols = ["Order ID", "Order Number", "Order Date"] + [c for c in df_discrepancies.columns if c not in ["Order ID", "Order Number", "Order Date"]]
+        df_discrepancies = df_discrepancies[[c for c in desired_cols if c in df_discrepancies.columns]]
 
     # == 5. Seller Contact Map & Grouping =====================================
     seller_groups = {}
